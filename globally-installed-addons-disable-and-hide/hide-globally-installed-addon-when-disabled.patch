@@ -1,14 +1,11 @@
 # HG changeset patch
-# User Sachin Hosmani <sachinhosmani2@gmail.com>
-# Date 1367045210 -19800
-# Node ID fc05895689dbaacf864d622d1178c6ef4852bbd8
-# Parent  ba71b389413fc63e4599ddb5ba2cf64f54a0e9a0
+# Parent ba71b389413fc63e4599ddb5ba2cf64f54a0e9a0
 Hide globally installed addon from Addon Manager when disabled
 
 diff --git a/toolkit/mozapps/extensions/content/extensions.js b/toolkit/mozapps/extensions/content/extensions.js
 --- a/toolkit/mozapps/extensions/content/extensions.js
 +++ b/toolkit/mozapps/extensions/content/extensions.js
-@@ -1392,30 +1392,34 @@
+@@ -1392,30 +1392,35 @@
      aList.appendChild(element);
  }
  
@@ -20,7 +17,8 @@ diff --git a/toolkit/mozapps/extensions/content/extensions.js b/toolkit/mozapps/
 -    addons = aAddonsList;
 +    // Don't show globally installed add-ons that are disabled
 +    addons = aAddonsList.filter(function addonsFilter(aAddon) {
-+      return !(aAddon.scope === AddonManager.SCOPE_APPLICATION && 
++      return !((aAddon.scope === AddonManager.SCOPE_APPLICATION || 
++        aAddon.scope === AddonManager.SCOPE_SYSTEM) && 
 +          aAddon.userDisabled === true);
 +    });
      if (installs != null)
