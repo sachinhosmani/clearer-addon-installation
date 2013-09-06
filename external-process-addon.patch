@@ -2,7 +2,7 @@
 # User Sachin Hosmani <sachinhosmani2@gmail.com>
 # Date 1372013209 -19800
 #      Mon Jun 24 00:16:49 2013 +0530
-# Node ID 7a7ec7751aba07c92545b975666f1d96ddf4bf8c
+# Node ID d089720b883130675d1000e62375e3eba486bf4f
 # Parent  399906087127f0533d6b654a1dbc47f36ab31080
 Bug 879480 - Allow external processes to request add-on installs / uninstalls
 
@@ -25,7 +25,7 @@ diff --git a/browser/components/nsBrowserContentHandler.js b/browser/components/
  
  const nsISupports            = Components.interfaces.nsISupports;
  
-@@ -516,27 +517,66 @@
+@@ -516,27 +517,63 @@
          cmdLine.removeArguments(i, i);
          cmdLine.preventDefault = true;
  
@@ -38,9 +38,6 @@ diff --git a/browser/components/nsBrowserContentHandler.js b/browser/components/
 +    try {
 +      let arg = cmdLine.handleFlagWithParam("install-global-addon", false);
 +      if (arg) {
-+        if (cmdLine.handleFlag("no-remote", false)) {
-+          Components.utils.reportError("-install-global-addon flag isn't used with -no-remote");
-+        }
 +        // Try to get the most recent window
 +        let win = RecentWindow.getMostRecentBrowserWindow();
 +        if (win) {
@@ -173,7 +170,7 @@ diff --git a/toolkit/mozapps/extensions/AddonManager.jsm b/toolkit/mozapps/exten
 diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extensions/XPIProvider.jsm
 --- a/toolkit/mozapps/extensions/XPIProvider.jsm
 +++ b/toolkit/mozapps/extensions/XPIProvider.jsm
-@@ -3368,16 +3368,332 @@
+@@ -3368,16 +3368,299 @@
        if (aInstall)
          aCallback(aInstall.wrapper);
        else
@@ -242,10 +239,20 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
 +        newAddon.userDisabled = true;
 +
 +      newAddon.active = (newAddon.visible && !isAddonDisabled(newAddon));
++      let wrapper = createWrapper(newAddon);
 +
++      if (newAddon.visible) {
++        // This should take care of updating the UI with the new add-on.
++        AddonManagerPrivate.callInstallListeners("onExternalInstall", null,
++                                                 wrapper,
++                                                 createWrapper(aExistingAddon),
++                                                 requiresRestart);
++      }
++      AddonManagerPrivate.callAddonListeners("onInstalling", wrapper, requiresRestart);
++
++      let requiresRestart = XPIProvider.installRequiresRestart(newAddon);
 +      let newDBAddon = XPIDatabase.addAddonMetadata(newAddon, aAddonState.descriptor);
-+      let wrapper = createWrapper(newDBAddon);
-+      let requiresRestart = XPIProvider.installRequiresRestart(wrapper);
++      wrapper = createWrapper(newDBAddon);
 +
 +      if (newDBAddon.visible) {
 +        // Note if any visible add-on is not in the application install location
@@ -283,15 +290,7 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
 +        else
 +          return true;
 +
-+        if (newAddon.visible) {
-+          // This should take care of updating the UI with the new add-on.
-+          AddonManagerPrivate.callInstallListeners("onExternalInstall", null,
-+                                                   wrapper,
-+                                                   createWrapper(aExistingAddon),
-+                                                   requiresRestart);
-+        }
-+        AddonManagerPrivate.callAddonListeners("onInstalling", wrapper, requiresRestart);
-+        if (newAddon.visible) {
++        if (newDBAddon.bootstrap) {
 +          // Visible bootstrapped add-ons need to have their install method called
 +          let file = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
 +          file.persistentDescriptor = aAddonState.descriptor;
@@ -299,7 +298,7 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
 +                                          newDBAddon.type, file, "install",
 +                                          installReason, extraParams);
 +
-+          AddonManagerPrivate.callAddonListeners("onInstalled", wrapper);
++          AddonManagerPrivate.callAddonListeners("onInstalled", wrapper, wrapper);
 +          if (!newDBAddon.active)
 +            XPIProvider.unloadBootstrapScope(newDBAddon.id);
 +          else
@@ -319,63 +318,24 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
 +      return;
 +    }
 +
-+    // We find the registry path to look in the registry if this is Windows.
-+    let path;
-+    let (appVendor = Services.appinfo.vendor, appName = Services.appinfo.name) {
-+#ifdef MOZ_THUNDERBIRD
-+      // XXX Thunderbird doesn't specify a vendor string
-+      if (appVendor == "")
-+        appVendor = "Mozilla";
-+#endif
-+
-+      // XULRunner-based apps may intentionally not specify a vendor
-+      if (appVendor != "")
-+        appVendor += "\\";
-+
-+      path = "SOFTWARE\\" + appVendor + appName + "\\Extensions";
-+    }
-+
++    let parent = aFile.parent;
 +    let id, locationKey;
 +    // We iterate through all install locations and try to find the add-on that
 +    // is to be installed.
 +    for (locationKey in this.installLocationsByName) {
-+      //if (locationKey === KEY_PROFILEDIR)
-+        //continue;
++      if (locationKey === KEY_PROFILEDIR)
++        continue;
 +      let installLocation = this.installLocationsByName[locationKey];
-+      if (!(installLocation instanceof DirectoryInstallLocation)) {
-+        // This means it is an instance of WinRegInstallLocation.
-+        let key = Cc["@mozilla.org/windows-registry-key;1"].
-+                  createInstance(Ci.nsIWindowsRegKey);
-+        try {
-+          key.open(installLocation.rootKey, path, Ci.nsIWindowsRegKey.ACCESS_READ);
-+        }
-+        catch (e) {
-+          WARN("Unable to open regsitry location: " + locationKey);
-+          continue;
-+        }
-+        // Reload the File-ID maps.
-+        installLocation._readAddons(key);
-+        key.close();
++      // Try to load just this add-on into the location's map.
++      if (installLocation instanceof DirectoryInstallLocation) {
++        if (installLocation.directory.equals(parent))
++          id = installLocation.lookUpAddon(aFile.leafName);
++      } else {
++        id = installLocation.lookUpAddon(aFile);
 +      }
-+      else {
-+        if (installLocation.directory.exists()) {
-+          // Reload the File-ID maps.
-+          installLocation._readAddons();
-+          // Check each install location whose map was updated if this new add-on
-+          // is found. If it is, we have found the install location.
-+          try {
-+            id = installLocation.getIDForLocation(aFile);
-+          } catch (e) {
-+            // The add-on doesn't exist here. We'll simply proceed.
-+          }
-+          if (id) {
-+            // We have found the specified file in one of our install locations.
-+            break;
-+          }
-+        }
-+        else {
-+          LOG("Directory doesn't exist: " + installLocation.directory.path);
-+        }
++      if (id) {
++        // We have found the specified file in one of the install locations.
++        break;
 +      }
 +    }
 +
@@ -389,7 +349,7 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
 +
 +    // Telemetry probe added around getInstallLocationStates() to check perf
 +    let telemetryCaptureTime = new Date();
-+    let state = this.getInstallLocationStates();
++    let states = this.getInstallLocationStates();
 +    let telemetry = Services.telemetry;
 +    telemetry.getHistogramById("CHECK_ADDONS_MODIFIED_MS").add(new Date() -
 +                                                               telemetryCaptureTime);
@@ -398,7 +358,7 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
 +    // the database. This will save reading from the database if there hasn't
 +    // been a change in state.
 +    let cache = Prefs.getCharPref(PREF_INSTALL_CACHE, null);
-+    let updateDatabase = cache != JSON.stringify(state);
++    let updateDatabase = cache != JSON.stringify(states);
 +
 +    let restartLess;
 +    if (!updateDatabase) {
@@ -423,7 +383,6 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
 +      // discovered before this method was called, we check if an add-on of the
 +      // same ID existed there. If one did, it might shadow the new add-on.
 +      // We also hide all add-ons of the same ID in lower priority locations.
-+      let states = this.getInstallLocationStates();
 +      let existingAddon;
 +      let aState;
 +      states = states.reverse();
@@ -439,7 +398,7 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
 +                // This is a lower priority location than the add-on's.
 +                existingAddon = addon;
 +              }
-+              if (!aState) {
++              if (!aState && !shadowed) {
 +                // This is higher priority location that the add-on's.
 +                shadowed = true;
 +              }
@@ -448,14 +407,19 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
 +        }
 +      }
 +      try {
-+        restartless = addMetaData(XPIProvider.installLocationsByName[locationKey],
++        restartLess = addMetaData(XPIProvider.installLocationsByName[locationKey],
 +                                  id, shadowed, existingAddon, aState.addons[id]);
 +      } catch (e) {
-+        LOG("Error adding new add-on to database");
++        LOG("Error adding new add-on to database " + e);
 +        aCallback(null);
 +        return;
 +      }
 +      AddonManagerPrivate.recordSimpleMeasure("installedUnpacked", this.unpackedAddons);
++
++      states = this.getInstallLocationStates();
++      // Cache the new install location states
++      let cache = JSON.stringify(states);
++      Services.prefs.setCharPref(PREF_INSTALL_CACHE, cache);
 +
 +      // Perform the remaining database operations
 +      LOG("Updating database with changes to installed add-on");
@@ -472,7 +436,7 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
 +    // Check that the add-ons list still exists
 +    let addonsList = FileUtils.getFile(KEY_PROFILEDIR, [FILE_XPI_ADDONS_LIST],
 +                                       true);
-+    if (addonsList.exists() == (state.length == 0)) {
++    if (addonsList.exists() == (states.length == 0)) {
 +      LOG("Add-ons list is invalid, rebuilding");
 +      XPIDatabase.writeAddonsList();
 +    }
@@ -506,7 +470,78 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
    removeActiveInstall: function XPI_removeActiveInstall(aInstall) {
      this.installs = this.installs.filter(function installFilter(i) i != aInstall);
    },
-@@ -6575,16 +6891,23 @@
+@@ -6561,30 +6844,94 @@
+       }
+ 
+       this._IDToFileMap[id] = entry;
+       this._FileToIDMap[entry.path] = id;
+     }
+   },
+ 
+   /**
++   * Checks if add-on of the passed file name exists in this location.
++   * If so, it adds it to its map.
++   *
++   * @param aFileName
++   *        The name of the file (or directory) corresponding to the add-on
++   * @return The id of the add-on if such a file actually exists.
++   */
++  lookUpAddon: function DirInstallLocation_lookUpAddon(aFileName) {
++    let entries = getDirectoryEntries(this.directory);
++    let id = aFileName;
++    if (id.substring(id.length - 4).toLowerCase() === ".xpi") {
++      id = id.substring(0, id.length - 4);
++    }
++    if (!gIDTest.test(id)) {
++      LOG("Ignoring add-on file whose name is not a valid add-on ID.");
++      return;
++    }
++    if (id in this._IDToFileMap) {
++      LOG("Add-on has already been read.");
++      return;
++    }
++    // Iterate through the entries under this directory and try to find the
++    // passed file name
++    for (let entry of entries) {
++      if (aFileName === entry.leafName) {
++        let directLoad = false;
++        if (entry.isFile() &&
++            entry.leafName.substring(entry.leafName.length - 4).toLowerCase() == ".xpi") {
++          directLoad = true;
++        }
++        if (entry.isFile() && !directLoad) {
++          let newEntry = this._readDirectoryFromFile(entry);
++          if (!newEntry && !this.locked) {
++            LOG("Deleting stale pointer file " + entry.path);
++            try {
++              entry.remove(true);
++            }
++            catch (e) {
++              WARN("Failed to remove stale pointer file " + entry.path, e);
++              // Failing to remove the stale pointer file is ignorable
++            }
++            return;
++          }
++
++          entry = newEntry;
++          this._linkedAddons.push(id);
++        }
++
++        this._IDToFileMap[id] = entry;
++        this._FileToIDMap[entry.path] = id;
++        return id;
++      }
++    }
++    LOG("No such add-on exists in " + this.directory.path + "\n");
++  },
++
++  /**
+    * Gets the name of this install location.
+    */
+   get name() {
+     return this._name;
+   },
+ 
    /**
     * Gets the scope of this install location.
     */
@@ -530,8 +565,82 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
        locations.push(this._IDToFileMap[id].clone());
      }
      return locations;
-@@ -6905,16 +7228,23 @@
+@@ -6898,16 +7245,83 @@
+       }
+ 
+       this._IDToFileMap[id] = file;
+       this._FileToIDMap[file.path] = id;
+     }
+   },
+ 
    /**
++   * Checks if there is an entry corresponding to the add-on in here.
++   * If so, it adds it to its map.
++   *
++   * @param aFile
++   *        An nsIFile corresponding to the add-on
++   * @return The id of the add-on if such an add-on actually exists.
++   */
++  lookUpAddon: function RegInstallLocation_lookUpAddon(aFile) {
++    let id = aFile.leafName;
++    let res = null;
++    if (id.substring(id.length - 4).toLowerCase() === ".xpi") {
++      id = id.substring(0, id.length - 4);
++    }
++    if (!gIDTest.test(id)) {
++      LOG("Ignoring add-on file whose name is not a valid add-on ID.");
++      return;
++    }
++    if (id in this._IDToFileMap) {
++      LOG("Add-on has already been read.");
++      return;
++    }
++    let key = Cc["@mozilla.org/windows-registry-key;1"].
++              createInstance(Ci.nsIWindowsRegKey);
++    let regPath = this._appKeyPath + "\\Extensions";
++    // Reading the registry may throw an exception, and that's ok.  In error
++    // cases, we just leave ourselves in the empty state.
++    try {
++      key.open(this._rootKey, regPath, Ci.nsIWindowsRegKey.ACCESS_READ);
++    }
++    catch (e) {
++      return;
++    }
++    if (key && key.hasValue(id)) {
++      let path = key.readStringValue(id);
++      let file = Cc["@mozilla.org/file/local;1"].
++                 createInstance(Ci.nsILocalFile);
++      try {
++        file.initWithPath(path);
++      }
++      catch (e) {
++        if (e.result === NS_ERROR_FILE_UNRECOGNIZED_PATH) {
++          let roorStr = "";
++          switch (this._rootKey) {
++            case Ci.nsIWindowsRegKey.ROOT_KEY_CURRENT_USER:
++              roorStr = "HKEY_CURRENT_USER";
++              break;
++            case Ci.nsIWindowsRegKey.ROOT_KEY_LOCAL_MACHINE:
++              roorStr = "HKEY_LOCAL_MACHINE";
++              break;
++          }
++          ERROR("Wrong add-on path found in registry entry " + roorStr + "\\" +
++                regPath);
++        }
++      }
++      if (file && file.equals(aFile)) {
++        // The id will be returned
++        res = id;
++        // Add the add-on to the maps
++        this._IDToFileMap[id] = file;
++        this._FileToIDMap[file.path] = id;
++      }
++    }
++    key.close();
++    return res;
++  },
++
++  /**
     * Gets the name of this install location.
     */
    get name() {
@@ -539,18 +648,31 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
    },
  
    /**
-+   * Gets root key of this install location.
-+   */
-+  get rootKey() {
-+    return this._rootKey;
-+  },
-+
-+  /**
     * Gets the scope of this install location.
-    */
-   get scope() {
-     return this._scope;
-   },
+diff --git a/toolkit/mozapps/extensions/content/extensions.xml b/toolkit/mozapps/extensions/content/extensions.xml
+--- a/toolkit/mozapps/extensions/content/extensions.xml
++++ b/toolkit/mozapps/extensions/content/extensions.xml
+@@ -1552,16 +1552,23 @@
+       </method>
  
-   /**
-    * Gets an array of nsIFiles for add-ons installed in this location.
+       <method name="onDisabled">
+         <body><![CDATA[
+           this._updateState();
+         ]]></body>
+       </method>
+ 
++      <method name="onInstalled">
++        <parameter name="aAddon"/>
++        <body><![CDATA[
++          this._initWithAddon(aAddon);
++        ]]></body>
++      </method>
++
+       <method name="onUninstalling">
+         <parameter name="aRestartRequired"/>
+         <body><![CDATA[
+           this._updateState();
+         ]]></body>
+       </method>
+ 
+       <method name="onOperationCancelled">
