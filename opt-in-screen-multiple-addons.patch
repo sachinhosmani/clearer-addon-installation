@@ -1,0 +1,804 @@
+# HG changeset patch
+# Parent 287032af05f7465b51994bb9ce576eb99448dde1
+Bug 769495 - about:newaddon should scale better with multiple add-ons
+
+diff --git a/browser/components/nsBrowserGlue.js b/browser/components/nsBrowserGlue.js
+--- a/browser/components/nsBrowserGlue.js
++++ b/browser/components/nsBrowserGlue.js
+@@ -608,23 +608,37 @@
+       this._showPluginUpdatePage();
+ 
+     // For any add-ons that were installed disabled and can be enabled offer
+     // them to the user.
+     let changedIDs = AddonManager.getStartupChanges(AddonManager.STARTUP_CHANGE_INSTALLED);
+     if (changedIDs.length > 0) {
+       let win = this.getMostRecentBrowserWindow();
+       AddonManager.getAddonsByIDs(changedIDs, function(aAddons) {
++        // The URL's format is about:newaddon?id=<id1>&id=<id2>&id=<id3> ...
++        let query = "";
++        let first = true;
+         aAddons.forEach(function(aAddon) {
++          // We're iterating through all the add-ons and adding each one's ID
++          // to the query of the URL.
++
+           // If the add-on isn't user disabled or can't be enabled then skip it.
+           if (!aAddon.userDisabled || !(aAddon.permissions & AddonManager.PERM_CAN_ENABLE))
+             return;
+-
+-          win.openUILinkIn("about:newaddon?id=" + aAddon.id, "tab");
+-        })
++          if (!first) {
++            query += '&';
++          }
++          if (first) {
++            first = !first;
++          }
++          query += "id=" + aAddon.id;
++        });
++        if (query) {
++          win.openUILinkIn("about:newaddon?" + query, "tab");
++        }
+       });
+     }
+ 
+     // Perform default browser checking.
+     var shell;
+     try {
+       shell = Components.classes["@mozilla.org/browser/shell-service;1"]
+         .getService(Components.interfaces.nsIShellService);
+diff --git a/toolkit/locales/en-US/chrome/mozapps/extensions/newaddon.dtd b/toolkit/locales/en-US/chrome/mozapps/extensions/newaddon.dtd
+--- a/toolkit/locales/en-US/chrome/mozapps/extensions/newaddon.dtd
++++ b/toolkit/locales/en-US/chrome/mozapps/extensions/newaddon.dtd
+@@ -1,15 +1,17 @@
+ <!-- This Source Code Form is subject to the terms of the Mozilla Public
+    - License, v. 2.0. If a copy of the MPL was not distributed with this
+    - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+ 
+ <!ENTITY title           "Install Add-on">
+ <!ENTITY intro           "Another program on your computer would like to modify
+-                          &brandShortName; with the following add-on:">
++                          &brandShortName; with the following add-ons:">
++<!ENTITY showMessage     "Why am I being asked to install this add-on?">
++<!ENTITY messageHeading  "Message from the vendor">
+ <!ENTITY warning         "Install add-ons only from authors whom you trust.">
+-<!ENTITY allow           "Allow this installation">
++<!ENTITY instruction     "Check the add-ons you would like to install.">
+ <!ENTITY later           "You can always change your mind at any time by going
+                           to the Add-ons Manager.">
+ <!ENTITY continue        "Continue">
+-<!ENTITY restartMessage  "You must restart &brandShortName; to finish installing this add-on.">
++<!ENTITY restartMessage  "You must restart &brandShortName; to finish installing these add-ons.">
+ <!ENTITY restartButton   "Restart &brandShortName;">
+ <!ENTITY cancelButton    "Cancel">
+diff --git a/toolkit/mozapps/extensions/content/newaddon.js b/toolkit/mozapps/extensions/content/newaddon.js
+--- a/toolkit/mozapps/extensions/content/newaddon.js
++++ b/toolkit/mozapps/extensions/content/newaddon.js
+@@ -4,109 +4,151 @@
+ 
+ const Cc = Components.classes;
+ const Ci = Components.interfaces;
+ const Cu = Components.utils;
+ 
+ Cu.import("resource://gre/modules/Services.jsm");
+ Cu.import("resource://gre/modules/AddonManager.jsm");
+ 
+-var gAddon = null;
++// This object contains objects of the add-ons to be shown in the opt-in screen.
++// Each add-on can be retrieved by its ID as the key.
++var gAddons = {};
+ 
+ // If the user enables the add-on through some other UI close this window
+ var EnableListener = {
+   onEnabling: function EnableListener_onEnabling(aAddon) {
+-    if (aAddon.id == gAddon.id)
+-      window.close();
++    if (aAddon.id in gAddons) {
++      // Remove the richlistitem corresponding to this add-on.
++      let addonsNode = document.getElementById("addons-info");
++      let childNodes = addonsNode.childNodes;
++      for (let node of childNodes) {
++        if (node.getAttribute("addon-id") === aAddon.id) {
++          addonsNode.removeChild(node);
++          break;
++        }
++      }
++      // If that was the only add-on, we close the tab.
++      if (addonsNode.childNodes.length === 0) {
++        window.close();
++      }
++    }
+   }
+ }
+ AddonManager.addAddonListener(EnableListener);
+ 
+ function initialize() {
+   // About URIs don't implement nsIURL so we have to find the query string
+   // manually
+   let spec = document.location.href;
+   let pos = spec.indexOf("?");
+   let query = "";
+   if (pos >= 0)
+     query = spec.substring(pos + 1);
+ 
+-  // Just assume the query is "id=<id>"
+-  let id = query.substring(3);
+-  if (!id) {
++  // The query will be of the form id=<id1>&id=<id2>...
++  let ids = (query.substring(3)).split('&id=').
++                                filter(function(id) {
++                                  return !!id;
++                                });
++
++  if (ids.length === 0) {
+     window.location = "about:blank";
+     return;
+   }
+ 
+   let bundle = Services.strings.createBundle("chrome://mozapps/locale/extensions/newaddon.properties");
+ 
+-  AddonManager.getAddonByID(id, function initialize_getAddonByID(aAddon) {
+-    // If the add-on doesn't exist or it is already enabled or it cannot be
+-    // enabled then this UI is useless, just close it. This shouldn't normally
+-    // happen unless session restore restores the tab
+-    if (!aAddon || !aAddon.userDisabled ||
+-        !(aAddon.permissions & AddonManager.PERM_CAN_ENABLE)) {
++  AddonManager.getAddonsByIDs(ids, function initialize_getAddonsByIDs(aAddons) {
++    let addonsFound = 0;
++    let addonsNode = document.getElementById("addons-info");
++    for (let addon of aAddons) {
++      if (!addon || !addon.userDisabled ||
++          !(addon.permissions & AddonManager.PERM_CAN_ENABLE)) {
++        continue;
++      }
++
++      addonsFound++;
++      gAddons[addon.id] = addon;
++
++      let item = document.createElement("richlistitem");
++      item.setAttribute("class", "addon-item");
++
++      item.setAttribute("type", addon.type);
++
++      if (addon.icon64URL)
++        item.setAttribute("icon", addon.icon64URL);
++      else if (addon.iconURL)
++        item.setAttribute("icon", addon.iconURL);
++
++      let name = bundle.formatStringFromName("name", [addon.name, addon.version],
++                                             2);
++      item.setAttribute("name", name);
++
++      if (addon.creator) {
++        let creator = bundle.formatStringFromName("author", [addon.creator], 1);
++        item.setAttribute("creator", creator);
++      } else {
++        item.hideAuthor();
++      }
++
++      let uri = "getResourceURI" in addon ? addon.getResourceURI() : null;
++      if (uri instanceof Ci.nsIFileURL) {
++        let location = bundle.formatStringFromName("location", [uri.file.path], 1);
++        item.setAttribute("location", location);
++        item.setAttribute("locationTooltiptext", location);
++      } else {
++        item.hideLocation();
++      }
++
++      item.setAttribute("addon-id", addon.id);
++      addonsNode.appendChild(item);
++    }
++    if (addonsFound === 0) {
++      // This must be the case when all the add-ons have already been installed
++      // and this about:newaddon tab was shown by the session history.
+       window.close();
+       return;
+     }
+-
+-    gAddon = aAddon;
+-
+-    document.getElementById("addon-info").setAttribute("type", aAddon.type);
+-
+-    let icon = document.getElementById("icon");
+-    if (aAddon.icon64URL)
+-      icon.src = aAddon.icon64URL;
+-    else if (aAddon.iconURL)
+-      icon.src = aAddon.iconURL;
+-
+-    let name = bundle.formatStringFromName("name", [aAddon.name, aAddon.version],
+-                                           2);
+-    document.getElementById("name").value = name;
+-
+-    if (aAddon.creator) {
+-      let creator = bundle.formatStringFromName("author", [aAddon.creator], 1);
+-      document.getElementById("author").value = creator;
+-    } else {
+-      document.getElementById("author").hidden = true;
+-    }
+-
+-    let uri = "getResourceURI" in aAddon ? aAddon.getResourceURI() : null;
+-    let locationLabel = document.getElementById("location");
+-    if (uri instanceof Ci.nsIFileURL) {
+-      let location = bundle.formatStringFromName("location", [uri.file.path], 1);
+-      locationLabel.value = location;
+-      locationLabel.setAttribute("tooltiptext", location);
+-    } else {
+-      document.getElementById("location").hidden = true;
+-    }
+-
+-    var event = document.createEvent("Events");
+-    event.initEvent("AddonDisplayed", true, true);
++    let event = new CustomEvent("AddonDisplayed", {
++      bubbles: true,
++      cancelable: true
++    });
+     document.dispatchEvent(event);
+   });
+ }
+ 
+ function unload() {
+   AddonManager.removeAddonListener(EnableListener);
+ }
+ 
+ function continueClicked() {
+   AddonManager.removeAddonListener(EnableListener);
+ 
+-  if (document.getElementById("allow").checked) {
+-    gAddon.userDisabled = false;
++  let restartNeeded = false;
+ 
+-    if (gAddon.pendingOperations & AddonManager.PENDING_ENABLE) {
+-      document.getElementById("allow").disabled = true;
+-      document.getElementById("buttonDeck").selectedPanel = document.getElementById("restartPanel");
+-      return;
++  let addonsNode = document.getElementById("addons-info");
++  let childNodes = addonsNode.childNodes;
++  for (let node of childNodes) {
++    // Disable all checkboxes
++    node.disableCheckbox();
++    if (node.checked) {
++      // The add-on is to be installed.
++      let addon = gAddons[node.getAttribute("addon-id")];
++      addon.userDisabled = false;
++      if (addon.pendingOperations & AddonManager.PENDING_ENABLE) {
++        restartNeeded = true;
++      }
+     }
+   }
+-
++  if (restartNeeded) {
++    // Show the restart button.
++    document.getElementById("buttonDeck").selectedPanel = document.getElementById("restartPanel");
++    return;
++  }
+   window.close();
+ }
+ 
+ function restartClicked() {
+   let cancelQuit = Cc["@mozilla.org/supports-PRBool;1"].
+                    createInstance(Ci.nsISupportsPRBool);
+   Services.obs.notifyObservers(cancelQuit, "quit-application-requested",
+                                "restart");
+@@ -116,14 +158,19 @@
+   window.close();
+ 
+   let appStartup = Components.classes["@mozilla.org/toolkit/app-startup;1"].
+                    getService(Components.interfaces.nsIAppStartup);
+   appStartup.quit(Ci.nsIAppStartup.eAttemptQuit |  Ci.nsIAppStartup.eRestart);
+ }
+ 
+ function cancelClicked() {
+-  gAddon.userDisabled = true;
++  let addonsNode = document.getElementById("addons-info");
++  let childNodes = addonsNode.childNodes;
++  for (let node of childNodes) {
++    node.enableCheckbox();
++    let addon = gAddons[node.getAttribute("addon-id")];
++    addon.userDisabled = true;
++  }
+   AddonManager.addAddonListener(EnableListener);
+ 
+-  document.getElementById("allow").disabled = false;
+   document.getElementById("buttonDeck").selectedPanel = document.getElementById("continuePanel");
+ }
+diff --git a/toolkit/mozapps/extensions/content/newaddon.xml b/toolkit/mozapps/extensions/content/newaddon.xml
+new file mode 100644
+--- /dev/null
++++ b/toolkit/mozapps/extensions/content/newaddon.xml
+@@ -0,0 +1,70 @@
++<?xml version="1.0"?>
++
++<!-- This Source Code Form is subject to the terms of the Mozilla Public
++   - License, v. 2.0. If a copy of the MPL was not distributed with this
++   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
++
++<!DOCTYPE bindings [
++  <!ENTITY % blocklistDTD SYSTEM "chrome://mozapps/locale/extensions/newaddon.dtd" >
++  %blocklistDTD;
++]>
++
++<!--Each richlistitem in about:newaddon uses the "newAddonItem" binding-->
++<bindings id="newAddonItemBindings"
++          xmlns="http://www.mozilla.org/xbl"
++          xmlns:xul="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
++          xmlns:xbl="http://www.mozilla.org/xbl">
++  <binding id="newAddonItem">
++    <resources>
++      <stylesheet src="chrome://mozapps/skin/extensions/newaddon.css"/>
++    </resources>
++    <content>
++      <xul:hbox id="item-container">
++        <xul:checkbox id="enable-checkbox" align="center"/>
++        <xul:image id="icon" xbl:inherits="src=icon"/>
++        <xul:vbox flex="1">
++          <xul:label id="name" xbl:inherits="value=name"></xul:label>
++          <xul:label id="author" xbl:inherits="value=author"></xul:label>
++          <xul:label id="location" xbl:inherits="value=location,tooltiptext=locationTooltiptext">
++          </xul:label>
++        </xul:vbox>
++      </xul:hbox>
++    </content>
++    <implementation>
++      <field name="_checkbox">
++        document.getAnonymousElementByAttribute(this, "id", "enable-checkbox")
++      </field>
++      <field name="_author">
++        document.getAnonymousElementByAttribute(this, "id", "author")
++      </field>
++      <field name="_location">
++        document.getAnonymousElementByAttribute(this, "id", "location")
++      </field>
++      <property name="checked" readonly="true">
++        <getter>
++          return this._checkbox.checked;
++        </getter>
++      </property>
++      <method name="hideAuthor">
++        <body>
++          this._author.hidden = true;
++        </body>
++      </method>
++      <method name="hideLocation">
++        <body>
++          this._location.hidden = true;
++        </body>
++      </method>
++      <method name="enableCheckbox">
++        <body>
++          this._checkbox.disabled = false;
++        </body>
++      </method>
++      <method name="disableCheckbox">
++        <body>
++          this._checkbox.disabled = true;
++        </body>
++      </method>
++    </implementation>
++  </binding>
++</bindings>
+diff --git a/toolkit/mozapps/extensions/content/newaddon.xul b/toolkit/mozapps/extensions/content/newaddon.xul
+--- a/toolkit/mozapps/extensions/content/newaddon.xul
++++ b/toolkit/mozapps/extensions/content/newaddon.xul
+@@ -25,31 +25,25 @@
+           src="chrome://mozapps/content/extensions/newaddon.js"/>
+ 
+   <scrollbox id="addon-scrollbox" align="center">
+     <spacer id="spacer-start"/>
+ 
+     <vbox id="addon-container" class="main-content">
+       <description>&intro;</description>
+ 
+-      <hbox id="addon-info">
+-        <image id="icon"/>
+-        <vbox flex="1">
+-          <label id="name"/>
+-          <label id="author"/>
+-          <label id="location" crop="end"/>
++      <richlistbox id="addons-info"/>
++
++      <description id="instruction">&instruction;</description>
++      <hbox id="warning">
++        <vbox pack="center">
++          <image id="warning-icon"/>
+         </vbox>
++        <description>&warning;</description>
+       </hbox>
+-
+-      <hbox id="warning">
+-        <image id="warning-icon"/>
+-        <description flex="1">&warning;</description>
+-      </hbox>
+-
+-      <checkbox id="allow" label="&allow;"/>
+       <description id="later">&later;</description>
+ 
+       <deck id="buttonDeck">
+         <hbox id="continuePanel">
+           <button id="continue-button" label="&continue;"
+                   oncommand="continueClicked()"/>
+         </hbox>
+         <hbox id="restartPanel">
+diff --git a/toolkit/mozapps/extensions/jar.mn b/toolkit/mozapps/extensions/jar.mn
+--- a/toolkit/mozapps/extensions/jar.mn
++++ b/toolkit/mozapps/extensions/jar.mn
+@@ -23,14 +23,15 @@
+   content/mozapps/extensions/selectAddons.js                    (content/selectAddons.js)
+   content/mozapps/extensions/selectAddons.css                   (content/selectAddons.css)
+ * content/mozapps/extensions/update.xul                         (content/update.xul)
+   content/mozapps/extensions/update.js                          (content/update.js)
+   content/mozapps/extensions/eula.xul                           (content/eula.xul)
+   content/mozapps/extensions/eula.js                            (content/eula.js)
+   content/mozapps/extensions/newaddon.xul                       (content/newaddon.xul)
+   content/mozapps/extensions/newaddon.js                        (content/newaddon.js)
++  content/mozapps/extensions/newaddon.xml                       (content/newaddon.xml)
+   content/mozapps/extensions/setting.xml                        (content/setting.xml)
+   content/mozapps/extensions/pluginPrefs.xul                    (content/pluginPrefs.xul)
+   content/mozapps/xpinstall/xpinstallConfirm.xul                (content/xpinstallConfirm.xul)
+   content/mozapps/xpinstall/xpinstallConfirm.js                 (content/xpinstallConfirm.js)
+   content/mozapps/xpinstall/xpinstallConfirm.css                (content/xpinstallConfirm.css)
+   content/mozapps/xpinstall/xpinstallItem.xml                   (content/xpinstallItem.xml)
+diff --git a/toolkit/themes/linux/mozapps/extensions/newaddon.css b/toolkit/themes/linux/mozapps/extensions/newaddon.css
+--- a/toolkit/themes/linux/mozapps/extensions/newaddon.css
++++ b/toolkit/themes/linux/mozapps/extensions/newaddon.css
+@@ -19,89 +19,95 @@
+ }
+ 
+ #spacer-end {
+   -moz-box-flex: 3;
+ }
+ 
+ #addon-container {
+   overflow: visible;
+-  max-width: 600px;
++  max-width: 700px;
+   margin: 20px;
+   padding: 30px 90px;
+ }
+ 
+-#addon-info {
+-  -moz-box-align: start;
++#addons-info {
++  height: 250px;
+   margin: 25px 10px;
+ }
+ 
+-#icon {
++.addon-item {
++  overflow-x: hidden;
++  -moz-binding: url("chrome://mozapps/content/extensions/newaddon.xml#newAddonItem");
++}
++
++.addon-item #icon {
+   -moz-margin-end: 10px;
+   max-width: 64px;
+   max-height: 64px;
+   list-style-image: url("chrome://mozapps/skin/extensions/extensionGeneric.png");
+ }
+ 
+-.addon-info[type="theme"] #icon {
++.addon-item[type="theme"] #icon {
+   list-style-image: url("chrome://mozapps/skin/extensions/themeGeneric.png");
+ }
+ 
+-.addon-info[type="locale"] #icon {
++.addon-item[type="locale"] #icon {
+   list-style-image: url("chrome://mozapps/skin/extensions/localeGeneric.png");
+ }
+ 
+-.addon-info[type="plugin"] #icon {
++.addon-item[type="plugin"] #icon {
+   list-style-image: url("chrome://mozapps/skin/plugins/pluginGeneric.png");
+ }
+ 
+-.addon-info[type="dictionary"] #icon {
++.addon-item[type="dictionary"] #icon {
+   list-style-image: url("chrome://mozapps/skin/extensions/dictionaryGeneric.png");
+ }
+ 
+-#name {
++.addon-item #item-container {
++  margin-top: 10px;
++  margin-bottom: 10px;
++}
++
++.addon-item #name {
+   font-size: 130%;
+ }
+ 
+-#author {
++.addon-item #author {
+   color: GrayText;
+ }
+ 
+-#location {
++.addon-item #location {
+   color: GrayText;
+ }
+ 
++#instruction {
++  margin-top: 10px;
++}
++
+ #warning {
+-  margin-bottom: 25px;
+-  -moz-box-align: start;
++  margin-top: 10px;
++  margin-bottom: 10px;
++  -moz-box-pack: center;
+ }
+ 
+ #warning-icon {
+   list-style-image: url("chrome://mozapps/skin/extensions/alerticon-warning.png");
+   width: 16px;
+   height: 15px;
+   -moz-margin-end: 5px;
+ }
+ 
+-#allow {
+-  -moz-margin-start: 84px;
+-  margin-bottom: 20px;
+-}
+-
+ #continuePanel,
+ #restartPanel {
+-  margin-top: 25px;
++  margin-top: 20px;
+   -moz-box-pack: end;
+   -moz-box-align: end;
+ }
+ 
+-#continuePanel {
+-  -moz-box-pack: end;
+-}
+-
+ #restartMessage {
+   text-align: right;
+ }
+ 
+ #restartSpacer {
+   -moz-box-flex: 1;
+ }
+ 
+diff --git a/toolkit/themes/osx/mozapps/extensions/newaddon.css b/toolkit/themes/osx/mozapps/extensions/newaddon.css
+--- a/toolkit/themes/osx/mozapps/extensions/newaddon.css
++++ b/toolkit/themes/osx/mozapps/extensions/newaddon.css
+@@ -21,89 +21,95 @@
+ }
+ 
+ #spacer-end {
+   -moz-box-flex: 3;
+ }
+ 
+ #addon-container {
+   overflow: visible;
+-  max-width: 600px;
++  max-width: 700px;
+   margin: 20px;
+   padding: 30px 90px;
+ }
+ 
+-#addon-info {
+-  -moz-box-align: start;
++#addons-info {
++  height: 250px;
+   margin: 25px 10px;
+ }
+ 
+-#icon {
++.addon-item {
++  overflow-x: hidden;
++  -moz-binding: url("chrome://mozapps/content/extensions/newaddon.xml#newAddonItem");
++}
++
++.addon-item #icon {
+   -moz-margin-end: 10px;
+   max-width: 64px;
+   max-height: 64px;
+   list-style-image: url("chrome://mozapps/skin/extensions/extensionGeneric.png");
+ }
+ 
+-.addon-info[type="theme"] #icon {
++.addon-item[type="theme"] #icon {
+   list-style-image: url("chrome://mozapps/skin/extensions/themeGeneric.png");
+ }
+ 
+-.addon-info[type="locale"] #icon {
++.addon-item[type="locale"] #icon {
+   list-style-image: url("chrome://mozapps/skin/extensions/localeGeneric.png");
+ }
+ 
+-.addon-info[type="plugin"] #icon {
++.addon-item[type="plugin"] #icon {
+   list-style-image: url("chrome://mozapps/skin/plugins/pluginGeneric.png");
+ }
+ 
+-.addon-info[type="dictionary"] #icon {
++.addon-item[type="dictionary"] #icon {
+   list-style-image: url("chrome://mozapps/skin/extensions/dictionaryGeneric.png");
+ }
+ 
+-#name {
++.addon-item #item-container {
++  margin-top: 10px;
++  margin-bottom: 10px;
++}
++
++.addon-item #name {
+   font-size: 130%;
+ }
+ 
+-#author {
++.addon-item #author {
+   color: GrayText;
+ }
+ 
+-#location {
++.addon-item #location {
+   color: GrayText;
+ }
+ 
++#instruction {
++  margin-top: 10px;
++}
++
+ #warning {
+-  margin-bottom: 25px;
+-  -moz-box-align: start;
++  margin-top: 10px;
++  margin-bottom: 10px;
++  -moz-box-pack: center;
+ }
+ 
+ #warning-icon {
+   list-style-image: url("chrome://mozapps/skin/extensions/alerticon-warning.png");
+   width: 16px;
+   height: 15px;
+   -moz-margin-end: 5px;
+ }
+ 
+-#allow {
+-  -moz-margin-start: 84px;
+-  margin-bottom: 20px;
+-}
+-
+ #continuePanel,
+ #restartPanel {
+-  margin-top: 25px;
++  margin-top: 20px;
+   -moz-box-align: center;
+   -moz-box-pack: end;
+ }
+ 
+-#continuePanel {
+-  -moz-box-pack: end;
+-}
+-
+ #restartMessage {
+   text-align: right;
+ }
+ 
+ #restartSpacer {
+   -moz-box-flex: 1;
+ }
+ 
+diff --git a/toolkit/themes/windows/mozapps/extensions/newaddon.css b/toolkit/themes/windows/mozapps/extensions/newaddon.css
+--- a/toolkit/themes/windows/mozapps/extensions/newaddon.css
++++ b/toolkit/themes/windows/mozapps/extensions/newaddon.css
+@@ -19,89 +19,95 @@
+ }
+ 
+ #spacer-end {
+   -moz-box-flex: 3;
+ }
+ 
+ #addon-container {
+   overflow: visible;
+-  max-width: 600px;
++  max-width: 700px;
+   margin: 20px;
+   padding: 30px 90px;
+ }
+ 
+-#addon-info {
+-  -moz-box-align: start;
++#addons-info {
++  height: 250px;
+   margin: 25px 10px;
+ }
+ 
+-#icon {
++.addon-item {
++  overflow-x: hidden;
++  -moz-binding: url("chrome://mozapps/content/extensions/newaddon.xml#newAddonItem");
++}
++
++.addon-item #icon {
+   -moz-margin-end: 10px;
+   max-width: 64px;
+   max-height: 64px;
+   list-style-image: url("chrome://mozapps/skin/extensions/extensionGeneric.png");
+ }
+ 
+-.addon-info[type="theme"] #icon {
++.addon-item[type="theme"] #icon {
+   list-style-image: url("chrome://mozapps/skin/extensions/themeGeneric.png");
+ }
+ 
+-.addon-info[type="locale"] #icon {
++.addon-item[type="locale"] #icon {
+   list-style-image: url("chrome://mozapps/skin/extensions/localeGeneric.png");
+ }
+ 
+-.addon-info[type="plugin"] #icon {
++.addon-item[type="plugin"] #icon {
+   list-style-image: url("chrome://mozapps/skin/plugins/pluginGeneric.png");
+ }
+ 
+-.addon-info[type="dictionary"] #icon {
++.addon-item[type="dictionary"] #icon {
+   list-style-image: url("chrome://mozapps/skin/extensions/dictionaryGeneric.png");
+ }
+ 
+-#name {
++.addon-item #item-container {
++  margin-top: 10px;
++  margin-bottom: 10px;
++}
++
++.addon-item #name {
+   font-size: 130%;
+ }
+ 
+-#author {
++.addon-item #author {
+   color: GrayText;
+ }
+ 
+-#location {
++.addon-item #location {
+   color: GrayText;
+ }
+ 
++#instruction {
++  margin-top: 10px;
++}
++
+ #warning {
+-  margin-bottom: 25px;
+-  -moz-box-align: start;
++  margin-top: 10px;
++  margin-bottom: 10px;
++  -moz-box-pack: center;
+ }
+ 
+ #warning-icon {
+   list-style-image: url("chrome://mozapps/skin/extensions/alerticon-warning.png");
+   width: 16px;
+   height: 15px;
+   -moz-margin-end: 5px;
+ }
+ 
+-#allow {
+-  -moz-margin-start: 84px;
+-  margin-bottom: 20px;
+-}
+-
+ #continuePanel,
+ #restartPanel {
+-  margin-top: 25px;
++  margin-top: 20px;
+   -moz-box-pack: end;
+   -moz-box-align: center;
+ }
+ 
+-#continuePanel {
+-  -moz-box-pack: end;
+-}
+-
+ #restartMessage {
+   text-align: right;
+ }
+ 
+ #restartSpacer {
+   -moz-box-flex: 1;
+ }
+ 
