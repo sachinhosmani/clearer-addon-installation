@@ -1,15 +1,15 @@
 # HG changeset patch
 # User Sachin Hosmani <sachinhosmani2@gmail.com>
-# Date 1378389531 -19800
-#      Thu Sep 05 19:28:51 2013 +0530
-# Node ID be99f4eeb2b813aa5892e2e87b2e11888db3b8c0
+# Date 1378550336 -19800
+#      Sat Sep 07 16:08:56 2013 +0530
+# Node ID 7065c4de92f16c7eda95f8b35a0cd3d7ba23e9b4
 # Parent  399906087127f0533d6b654a1dbc47f36ab31080
 Bug 640775 - Allow a form of uninstalling add-ons installed globally by third-party applications or system administrators
 
 diff --git a/toolkit/mozapps/extensions/AddonManager.jsm b/toolkit/mozapps/extensions/AddonManager.jsm
 --- a/toolkit/mozapps/extensions/AddonManager.jsm
 +++ b/toolkit/mozapps/extensions/AddonManager.jsm
-@@ -1872,16 +1872,49 @@
+@@ -1872,16 +1872,50 @@
  
        noMoreObjects: function getAddonsWithOperationsByTypes_noMoreObjects(caller) {
          safeCall(aCallback, addons);
@@ -50,6 +50,7 @@ diff --git a/toolkit/mozapps/extensions/AddonManager.jsm b/toolkit/mozapps/exten
 +      }
 +    });
 +  },
++
 +  /**
     * Adds a new AddonManagerListener if the listener is not already registered.
     *
@@ -59,7 +60,7 @@ diff --git a/toolkit/mozapps/extensions/AddonManager.jsm b/toolkit/mozapps/exten
    addManagerListener: function AMI_addManagerListener(aListener) {
      if (!aListener || typeof aListener != "object")
        throw Components.Exception("aListener must be an AddonManagerListener object",
-@@ -2350,16 +2383,20 @@
+@@ -2350,16 +2384,20 @@
      AddonManagerInternal.getAddonsByIDs(aIDs, aCallback);
    },
  
@@ -120,28 +121,44 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
     *         of passing through updated compatibility information
     * @return true if an add-on was installed or uninstalled
     */
-@@ -2986,16 +3006,20 @@
- 
-       // Check if the database knows about any add-ons in this install location.
+@@ -2988,27 +3008,34 @@
        if (knownLocations.has(installLocation.name)) {
          knownLocations.delete(installLocation.name);
          let addons = XPIDatabase.getAddonsInLocation(installLocation.name);
          // Iterate through the add-ons installed the last time the application
          // ran
          addons.forEach(function(aOldAddon) {
-+          if (aOldAddon.uninstalled) {
-+            // Uninstalled add-ons must not be processed.
-+            return;
-+          }
            // If a version of this add-on has been installed in an higher
            // priority install location then count it as changed
-           if (AddonManager.getStartupChanges(AddonManager.STARTUP_CHANGE_INSTALLED)
-                           .indexOf(aOldAddon.id) != -1) {
+-          if (AddonManager.getStartupChanges(AddonManager.STARTUP_CHANGE_INSTALLED)
+-                          .indexOf(aOldAddon.id) != -1) {
++          if (!aOldAddon.uninstalled &&
++              (AddonManager.getStartupChanges(AddonManager.STARTUP_CHANGE_INSTALLED)
++                           .indexOf(aOldAddon.id) != -1)) {
              AddonManagerPrivate.addStartupChange(AddonManager.STARTUP_CHANGE_CHANGED,
                                                   aOldAddon.id);
            }
  
-@@ -3448,16 +3472,59 @@
+           // Check if the add-on is still installed
+           if (aOldAddon.id in addonStates) {
+             let addonState = addonStates[aOldAddon.id];
+             delete addonStates[aOldAddon.id];
+ 
++            if (aOldAddon.uninstalled) {
++              // We don't process uninstalled add-ons. Now that it has been
++              // removed from addonStates, we can proceed.
++              return;
++            }
++
+             // Remember add-ons that were inactive during startup
+             if (aOldAddon.visible && !aOldAddon.active)
+               XPIProvider.inactiveAddonIDs.push(aOldAddon.id);
+ 
+             // Check if the add-on is unpacked, and has had other files changed
+             // on disk without the install.rdf manifest being changed
+             if ((addonState.rdfTime) && (aOldAddon.updateDate != addonState.mtime)) {
+               modifiedUnpacked += 1;
+@@ -3448,16 +3475,59 @@
              !(aInstall.addon.inDatabase))
            results.push(createWrapper(aInstall.addon));
        });
@@ -201,7 +218,7 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
     * @param  aCallback
     *         A callback to pass the array of AddonInstalls to
     */
-@@ -4108,43 +4175,50 @@
+@@ -4108,43 +4178,50 @@
     *         The DBAddonInternal to uninstall
     * @throws if the addon cannot be uninstalled because it is in an install
     *         location that does not allow it
@@ -261,7 +278,7 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
      function revealAddon(aAddon) {
        XPIDatabase.makeAddonVisible(aAddon);
  
-@@ -4183,36 +4257,59 @@
+@@ -4183,36 +4260,59 @@
          function checkInstallLocation_getAddonInLocation(aNewAddon) {
          if (aNewAddon)
            revealAddon(aNewAddon);
@@ -325,7 +342,7 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
    },
  
    /**
-@@ -4220,34 +4317,99 @@
+@@ -4220,34 +4320,101 @@
     *
     * @param  aAddon
     *         The DBAddonInternal to cancel uninstall for
@@ -344,7 +361,7 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
      });
  
 +    if (aAddon.uninstalled) {
-+      // This was a speical type of uninstallation because the add-on is in a 
++      // This was a speical type of uninstallation because the add-on is in a
 +      // locked location.
 +      XPIDatabase.setAddonProperties(aAddon, {
 +        visible: true,
@@ -392,8 +409,7 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
 +      // The add-ons list will have to be rewritten during shutdown.
 +      Services.prefs.setBoolPref(PREF_PENDING_OPERATIONS, true);
 +    }
-+    AddonManagerPrivate.callAddonListeners("onInstalling", this,
-+                                           requiresRestart);
++
 +    XPIDatabase.setAddonProperties(aAddon, {
 +      uninstalled: false
 +    });
@@ -402,10 +418,15 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
 +      userDisabled: false
 +    });
 +
++    if (!requiresRestart)
++      XPIDatabase.updateAddonActive(aAddon, true);
 +    let wrapper = createWrapper(aAddon);
++    AddonManagerPrivate.callInstallListeners("onExternalInstall", null, wrapper,
++                                             null, requiresRestart);
++    AddonManagerPrivate.callAddonListeners("onInstalling", wrapper,
++                                           requiresRestart);
 +    if (!requiresRestart) {
 +      if (aAddon.bootstrap) {
-+        XPIDatabase.updateAddonActive(aAddon, true);
 +        let file = aAddon._installLocation.getLocationForID(aAddon.id);
 +        XPIProvider.callBootstrapMethod(aAddon.id, aAddon.version, aAddon.type, file,
 +                                        "install", BOOTSTRAP_REASONS.ADDON_INSTALL);
@@ -415,8 +436,6 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
 +      AddonManagerPrivate.callAddonListeners("onInstalled", wrapper,
 +                                             requiresRestart);
 +    }
-+    AddonManagerPrivate.callInstallListeners("onExternalInstall", null, wrapper,
-+                                             null, requiresRestart);
 +    AddonManagerPrivate.callAddonListeners("onOperationCancelled", wrapper);
 +    flushStartupCache();
    }
@@ -427,7 +446,7 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
    // return the two-digit hexadecimal code for a byte
    function toHexString(charCode)
      ("0" + charCode.toString(16)).slice(-2);
-@@ -5717,16 +5879,18 @@
+@@ -5717,16 +5884,18 @@
  function AddonInternal() {
  }
  
@@ -446,7 +465,7 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
  
    get selectedLocale() {
      if (this._selectedLocale)
-@@ -6261,41 +6425,49 @@
+@@ -6261,41 +6430,49 @@
  
      if (!aAddon.appDisabled) {
        if (this.userDisabled)
@@ -499,7 +518,7 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
        }
        else {
          XPIProvider.updateAddonDisabledState(aAddon, val);
-@@ -6342,16 +6514,24 @@
+@@ -6342,16 +6519,24 @@
    this.uninstall = function AddonWrapper_uninstall() {
      if (!(aAddon.inDatabase))
        throw new Error("Cannot uninstall an add-on that isn't installed");

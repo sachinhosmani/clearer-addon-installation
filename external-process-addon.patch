@@ -2,7 +2,7 @@
 # User Sachin Hosmani <sachinhosmani2@gmail.com>
 # Date 1372013209 -19800
 #      Mon Jun 24 00:16:49 2013 +0530
-# Node ID d089720b883130675d1000e62375e3eba486bf4f
+# Node ID f2417f651f8c224476b4bfebcec006e2a23a3b70
 # Parent  399906087127f0533d6b654a1dbc47f36ab31080
 Bug 879480 - Allow external processes to request add-on installs / uninstalls
 
@@ -170,7 +170,7 @@ diff --git a/toolkit/mozapps/extensions/AddonManager.jsm b/toolkit/mozapps/exten
 diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extensions/XPIProvider.jsm
 --- a/toolkit/mozapps/extensions/XPIProvider.jsm
 +++ b/toolkit/mozapps/extensions/XPIProvider.jsm
-@@ -3368,16 +3368,299 @@
+@@ -3368,16 +3368,305 @@
        if (aInstall)
          aCallback(aInstall.wrapper);
        else
@@ -191,6 +191,7 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
 +
 +    /**
 +     * A helper function that adds an add-on to the database.
++     *
 +     * @param aInstallLocation
 +     *        The install location where the add-on is present.
 +     * @param aId
@@ -298,6 +299,11 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
 +                                          newDBAddon.type, file, "install",
 +                                          installReason, extraParams);
 +
++          // Two wrappers are being passed to the listener because the add-on
++          // list item might want to change its add-on object with the new add-on
++          // object from the DB. Since add-on listeners in UI are registered per add-on
++          // the 1st wrapper passed will only be used to check if a listener
++          // listens to this add-on. A more acceptable way of doing this is needed.
 +          AddonManagerPrivate.callAddonListeners("onInstalled", wrapper, wrapper);
 +          if (!newDBAddon.active)
 +            XPIProvider.unloadBootstrapScope(newDBAddon.id);
@@ -323,7 +329,7 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
 +    // We iterate through all install locations and try to find the add-on that
 +    // is to be installed.
 +    for (locationKey in this.installLocationsByName) {
-+      if (locationKey === KEY_PROFILEDIR)
++      if (locationKey === KEY_APP_PROFILE)
 +        continue;
 +      let installLocation = this.installLocationsByName[locationKey];
 +      // Try to load just this add-on into the location's map.
@@ -349,11 +355,11 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
 +
 +    // Telemetry probe added around getInstallLocationStates() to check perf
 +    let telemetryCaptureTime = new Date();
-+    let states = this.getInstallLocationStates();
 +    let telemetry = Services.telemetry;
 +    telemetry.getHistogramById("CHECK_ADDONS_MODIFIED_MS").add(new Date() -
 +                                                               telemetryCaptureTime);
 +
++    let states = this.getInstallLocationStates();
 +    // If the state has changed from the install cache then we must update
 +    // the database. This will save reading from the database if there hasn't
 +    // been a change in state.
@@ -470,7 +476,7 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
    removeActiveInstall: function XPI_removeActiveInstall(aInstall) {
      this.installs = this.installs.filter(function installFilter(i) i != aInstall);
    },
-@@ -6561,30 +6844,94 @@
+@@ -6561,30 +6850,94 @@
        }
  
        this._IDToFileMap[id] = entry;
@@ -565,7 +571,7 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
        locations.push(this._IDToFileMap[id].clone());
      }
      return locations;
-@@ -6898,16 +7245,83 @@
+@@ -6898,16 +7251,83 @@
        }
  
        this._IDToFileMap[id] = file;
