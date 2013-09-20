@@ -1,11 +1,98 @@
 # HG changeset patch
-# Parent 3c764487f56cec89a0e6a4d2b8326c33d1fd5a4e
+# User Sachin Hosmani <sachinhosmani2@gmail.com>
+# Date 1379703003 -19800
+#      Sat Sep 21 00:20:03 2013 +0530
+# Node ID 75b98a022fc7a173a0a54fc2b5b443f934f16142
+# Parent  f03b286b839048d9e24b6c27d8392ca6b7c00077
 Bug 897735 - Support regular expression filters for name and creator in extension blocks
 
+diff --git a/toolkit/mozapps/extensions/AddonUpdateChecker.jsm b/toolkit/mozapps/extensions/AddonUpdateChecker.jsm
+--- a/toolkit/mozapps/extensions/AddonUpdateChecker.jsm
++++ b/toolkit/mozapps/extensions/AddonUpdateChecker.jsm
+@@ -691,18 +691,17 @@
+ 
+     let blocklist = Cc["@mozilla.org/extensions/blocklist;1"].
+                     getService(Ci.nsIBlocklistService);
+ 
+     let newest = null;
+     for (let update of aUpdates) {
+       if (!update.updateURL)
+         continue;
+-      let state = blocklist.getAddonBlocklistState(update.id, update.version,
+-                                                   aAppVersion, aPlatformVersion);
++      let state = blocklist.getAddonBlocklistState(update, aAppVersion, aPlatformVersion);
+       if (state != Ci.nsIBlocklistService.STATE_NOT_BLOCKED)
+         continue;
+       if ((newest == null || (Services.vc.compare(newest.version, update.version) < 0)) &&
+           matchesVersions(update, aAppVersion, aPlatformVersion,
+                           aIgnoreMaxVersion, aIgnoreStrictCompat,
+                           aCompatOverrides)) {
+         newest = update;
+       }
+diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extensions/XPIProvider.jsm
+--- a/toolkit/mozapps/extensions/XPIProvider.jsm
++++ b/toolkit/mozapps/extensions/XPIProvider.jsm
+@@ -527,22 +527,20 @@
+                                aOldPlatformVersion) {
+   // Copy the properties by default
+   aNewAddon.userDisabled = aOldAddon.userDisabled;
+   aNewAddon.softDisabled = aOldAddon.softDisabled;
+ 
+   let bs = Cc["@mozilla.org/extensions/blocklist;1"].
+            getService(Ci.nsIBlocklistService);
+ 
+-  let oldBlocklistState = bs.getAddonBlocklistState(aOldAddon.id,
+-                                                    aOldAddon.version,
++  let oldBlocklistState = bs.getAddonBlocklistState(createWrapper(aOldAddon),
+                                                     aOldAppVersion,
+                                                     aOldPlatformVersion);
+-  let newBlocklistState = bs.getAddonBlocklistState(aNewAddon.id,
+-                                                    aNewAddon.version);
++  let newBlocklistState = bs.getAddonBlocklistState(createWrapper(aNewAddon));
+ 
+   // If the blocklist state hasn't changed then the properties don't need to
+   // change
+   if (newBlocklistState == oldBlocklistState)
+     return;
+ 
+   if (newBlocklistState == Ci.nsIBlocklistService.STATE_SOFTBLOCKED) {
+     if (aNewAddon.type != "theme") {
+@@ -5842,29 +5840,29 @@
+ 
+   get blocklistState() {
+     let staticItem = findMatchingStaticBlocklistItem(this);
+     if (staticItem)
+       return staticItem.level;
+ 
+     let bs = Cc["@mozilla.org/extensions/blocklist;1"].
+              getService(Ci.nsIBlocklistService);
+-    return bs.getAddonBlocklistState(this.id, this.version);
++    return bs.getAddonBlocklistState(createWrapper(this));
+   },
+ 
+   get blocklistURL() {
+     let staticItem = findMatchingStaticBlocklistItem(this);
+     if (staticItem) {
+       let url = Services.urlFormatter.formatURLPref("extensions.blocklist.itemURL");
+       return url.replace(/%blockID%/g, staticItem.blockID);
+     }
+ 
+     let bs = Cc["@mozilla.org/extensions/blocklist;1"].
+              getService(Ci.nsIBlocklistService);
+-    return bs.getAddonBlocklistURL(this.id, this.version);
++    return bs.getAddonBlocklistURL(createWrapper(this));
+   },
+ 
+   applyCompatibilityUpdate: function AddonInternal_applyCompatibilityUpdate(aUpdate, aSyncCompatibility) {
+     this.targetApplications.forEach(function(aTargetApp) {
+       aUpdate.targetApplications.forEach(function(aUpdateTarget) {
+         if (aTargetApp.id == aUpdateTarget.id && (aSyncCompatibility ||
+             Services.vc.compare(aTargetApp.maxVersion, aUpdateTarget.maxVersion) < 0)) {
+           aTargetApp.minVersion = aUpdateTarget.minVersion;
 diff --git a/toolkit/mozapps/extensions/nsBlocklistService.js b/toolkit/mozapps/extensions/nsBlocklistService.js
 --- a/toolkit/mozapps/extensions/nsBlocklistService.js
 +++ b/toolkit/mozapps/extensions/nsBlocklistService.js
-@@ -44,16 +44,19 @@
+@@ -44,16 +44,18 @@
  const DEFAULT_SEVERITY                = 3;
  const DEFAULT_LEVEL                   = 2;
  const MAX_BLOCK_LEVEL                 = 3;
@@ -14,8 +101,7 @@ diff --git a/toolkit/mozapps/extensions/nsBlocklistService.js b/toolkit/mozapps/
  const VULNERABILITYSTATUS_UPDATE_AVAILABLE = 1;
  const VULNERABILITYSTATUS_NO_UPDATE        = 2;
  
-+// A list of filters an extension can be blocked with.
-+const EXTENSION_BLOCK_FILTERS = ["id", "name", "creator", "updateURL", "homepageURL"];
++const EXTENSION_BLOCK_FILTERS = ["id", "name", "creator", "homepageURL"];
 +
  var gLoggingEnabled = null;
  var gBlocklistEnabled = true;
@@ -25,43 +111,90 @@ diff --git a/toolkit/mozapps/extensions/nsBlocklistService.js b/toolkit/mozapps/
                                     "@mozilla.org/consoleservice;1",
                                     "nsIConsoleService");
  
-@@ -266,16 +269,24 @@
- function Blocklist() {
-   let os = getObserverService();
-   os.addObserver(this, "xpcom-shutdown", false);
-   gLoggingEnabled = getPref("getBoolPref", PREF_EM_LOGGING_ENABLED, false);
-   gBlocklistEnabled = getPref("getBoolPref", PREF_BLOCKLIST_ENABLED, true);
-   gBlocklistLevel = Math.min(getPref("getIntPref", PREF_BLOCKLIST_LEVEL, DEFAULT_LEVEL),
-                                      MAX_BLOCK_LEVEL);
-   gPref.addObserver("extensions.blocklist.", this, false);
-+  this._addonCache = {};
-+  let self = this;
-+  let types = ["extension", "theme", "locale", "dictionary", "service"];
-+  AddonManager.getAddonsByTypes(types, function(addons) {
-+    for (let addon of addons) {
-+      self._addonCache[addon.id] = addon;
-+    }
-+  });
- }
+@@ -312,26 +314,26 @@
+           this._blocklistUpdated(null, null);
+           break;
+       }
+       break;
+     }
+   },
  
- Blocklist.prototype = {
+   /* See nsIBlocklistService */
+-  isAddonBlocklisted: function Blocklist_isAddonBlocklisted(id, version, appVersion, toolkitVersion) {
+-    return this.getAddonBlocklistState(id, version, appVersion, toolkitVersion) ==
++  isAddonBlocklisted: function Blocklist_isAddonBlocklisted(addon, appVersion, toolkitVersion) {
++    return this.getAddonBlocklistState(addon, appVersion, toolkitVersion) ==
+                    Ci.nsIBlocklistService.STATE_BLOCKED;
+   },
+ 
+   /* See nsIBlocklistService */
+-  getAddonBlocklistState: function Blocklist_getAddonBlocklistState(id, version, appVersion, toolkitVersion) {
++  getAddonBlocklistState: function Blocklist_getAddonBlocklistState(addon, appVersion, toolkitVersion) {
+     if (!this._addonEntries)
+       this._loadBlocklist();
+-    return this._getAddonBlocklistState(id, version, this._addonEntries,
++    return this._getAddonBlocklistState(addon, this._addonEntries,
+                                         appVersion, toolkitVersion);
+   },
+ 
    /**
-    * Extension ID -> array of Version Ranges
-    * Each value in the version range array is a JS Object that has the
-    * following properties:
-    *   "minVersion"  The minimum version in a version range (default = 0)
-@@ -368,21 +379,55 @@
+    * Private version of getAddonBlocklistState that allows the caller to pass in
+    * the add-on blocklist entries to compare against.
+    *
+    * @param   id
+@@ -344,32 +346,32 @@
+    *          The application version to compare to, will use the current
+    *          version if null.
+    * @param   toolkitVersion
+    *          The toolkit version to compare to, will use the current version if
+    *          null.
+    * @returns The blocklist state for the item, one of the STATE constants as
+    *          defined in nsIBlocklistService.
+    */
+-  _getAddonBlocklistState: function Blocklist_getAddonBlocklistStateCall(id,
+-                           version, addonEntries, appVersion, toolkitVersion) {
++  _getAddonBlocklistState: function Blocklist_getAddonBlocklistStateCall(addon,
++                           addonEntries, appVersion, toolkitVersion) {
+     if (!gBlocklistEnabled)
+       return Ci.nsIBlocklistService.STATE_NOT_BLOCKED;
+ 
+     if (!appVersion)
+       appVersion = gApp.version;
+     if (!toolkitVersion)
+       toolkitVersion = gApp.platformVersion;
+ 
+-    var blItem = this._findMatchingAddonEntry(addonEntries, id);
++    var blItem = this._findMatchingAddonEntry(addonEntries, addon);
+     if (!blItem)
+       return Ci.nsIBlocklistService.STATE_NOT_BLOCKED;
+ 
+     for (let currentblItem of blItem.versions) {
+-      if (currentblItem.includesItem(version, appVersion, toolkitVersion))
++      if (currentblItem.includesItem(addon.version, appVersion, toolkitVersion))
          return currentblItem.severity >= gBlocklistLevel ? Ci.nsIBlocklistService.STATE_BLOCKED :
                                                         Ci.nsIBlocklistService.STATE_SOFTBLOCKED;
      }
      return Ci.nsIBlocklistService.STATE_NOT_BLOCKED;
    },
  
+   /**
+    * Returns the set of prefs of the add-on stored in the blocklist file
+@@ -378,37 +380,64 @@
+    *        ID of the add-on.
+    */
+   _getAddonPrefs: function Blocklist_getAddonPrefs(id) {
+     let entry = this._findMatchingAddonEntry(this._addonEntries, id);
+     return entry.prefs.slice(0);
+   },
+ 
    _findMatchingAddonEntry: function Blocklist_findMatchingAddonEntry(aAddonEntries,
-                                                                      aId) {
+-                                                                     aId) {
++                                                                     aAddon) {
++    if (!aAddon)
++      return null;
 +    // Returns true if the params object passes the constraints set by entry.
-+    // (For every non-null property in entry, the corresponding property in params
-+    // must exist and be the same)
++    // (For every non-null property in entry, the same key must exist in
++    // params and value must be the same)
 +    function checkEntry(entry, params) {
 +      for (let key in entry) {
 +        if (entry[key] === null || entry[key] === undefined)
@@ -81,36 +214,48 @@ diff --git a/toolkit/mozapps/extensions/nsBlocklistService.js b/toolkit/mozapps/
 +      return true;
 +    }
 +
-+    let params = {
-+      id: aId
-+    };
-+
-+    let addon = this._addonCache[aId];
-+    if (addon) {
-+      for (let filter of EXTENSION_BLOCK_FILTERS) {
-+        if (addon[filter]) {
-+          params[filter] = addon[filter];
-+        }
-+      }
++    let params = {};
++    for (let filter of EXTENSION_BLOCK_FILTERS) {
++      params[filter] = aAddon[filter];
 +    }
 +    if (params.creator)
 +      params.creator = params.creator.name;
-+
      for (let entry of aAddonEntries) {
 -      if (entry.id instanceof RegExp) {
 -        if (entry.id.test(aId))
 -          return entry;
 -      } else if (entry.id == aId) {
+-        return entry;
+-      }
+-    }
+-    return null;
 +      if (checkEntry(entry.attributes, params)) {
-         return entry;
-       }
-     }
-     return null;
++         return entry;
++       }
++     }
++     return null;
    },
  
    /* See nsIBlocklistService */
-   getAddonBlocklistURL: function Blocklist_getAddonBlocklistURL(id, version, appVersion, toolkitVersion) {
-@@ -714,28 +759,36 @@
+-  getAddonBlocklistURL: function Blocklist_getAddonBlocklistURL(id, version, appVersion, toolkitVersion) {
++  getAddonBlocklistURL: function Blocklist_getAddonBlocklistURL(addon, appVersion, toolkitVersion) {
+     if (!gBlocklistEnabled)
+       return "";
+ 
+     if (!this._addonEntries)
+       this._loadBlocklist();
+ 
+-    let blItem = this._findMatchingAddonEntry(this._addonEntries, id);
++    let blItem = this._findMatchingAddonEntry(this._addonEntries, addon);
+     if (!blItem || !blItem.blockID)
+       return null;
+ 
+     return this._createBlocklistURL(blItem.blockID);
+   },
+ 
+   _createBlocklistURL: function Blocklist_createBlocklistURL(id) {
+     let url = Services.urlFormatter.formatURLPref(PREF_BLOCKLIST_ITEM_URL);
+@@ -729,28 +758,37 @@
      return result;
    },
  
@@ -121,9 +266,10 @@ diff --git a/toolkit/mozapps/extensions/nsBlocklistService.js b/toolkit/mozapps/
      let blockEntry = {
 -      id: null,
        versions: [],
+       prefs: [],
 -      blockID: null
 +      blockID: null,
-+      attributes: {}
++      attributes : {}
 +      // Atleast one of these must get added to attributes:
 +      // id, creator, name, updateURL, homepageURL
      };
@@ -140,37 +286,339 @@ diff --git a/toolkit/mozapps/extensions/nsBlocklistService.js b/toolkit/mozapps/
 +        blockEntry.attributes[filter] = RegExpCheck(attr);
 +    }
 +
-     var versionNodes = blocklistElement.childNodes;
+     var childNodes = blocklistElement.childNodes;
 -    var id = blocklistElement.getAttribute("id");
 -    // Add-on IDs cannot contain '/', so an ID starting with '/' must be a regex
 -    if (id.startsWith("/"))
 -      id = parseRegExp(id);
 -    blockEntry.id = id;
--
-     for (var x = 0; x < versionNodes.length; ++x) {
-       var versionRangeElement = versionNodes.item(x);
-       if (!(versionRangeElement instanceof Ci.nsIDOMElement) ||
-           versionRangeElement.localName != "versionRange")
+ 
+     for (let x = 0; x < childNodes.length; x++) {
+       var childElement = childNodes.item(x);
+       if (!(childElement instanceof Ci.nsIDOMElement))
          continue;
- 
-       blockEntry.versions.push(new BlocklistItemData(versionRangeElement));
+       if (childElement.localName === "prefs") {
+         let prefElements = childElement.childNodes;
+         for (let i = 0; i < prefElements.length; i++) {
+@@ -923,19 +961,18 @@
      }
-@@ -891,16 +944,18 @@
-   _blocklistUpdated: function Blocklist_blocklistUpdated(oldAddonEntries, oldPluginEntries) {
-     var addonList = [];
- 
      var self = this;
-     const types = ["extension", "theme", "locale", "dictionary", "service"]
+     const types = ["extension", "theme", "locale", "dictionary", "service"];
      AddonManager.getAddonsByTypes(types, function blocklistUpdated_getAddonsByTypes(addons) {
  
        for (let addon of addons) {
-+        if (!self._addonCache[addon.id])
-+          self._addonCache[addon.id] = addon;
          let oldState = Ci.nsIBlocklistService.STATE_NOTBLOCKED;
          if (oldAddonEntries)
-           oldState = self._getAddonBlocklistState(addon.id, addon.version,
-                                                   oldAddonEntries);
-         let state = self.getAddonBlocklistState(addon.id, addon.version);
+-          oldState = self._getAddonBlocklistState(addon.id, addon.version,
+-                                                  oldAddonEntries);
+-        let state = self.getAddonBlocklistState(addon.id, addon.version);
++          oldState = self._getAddonBlocklistState(addon, oldAddonEntries);
++        let state = self.getAddonBlocklistState(addon);
  
          LOG("Blocklist state for " + addon.id + " changed from " +
              oldState + " to " + state);
+ 
+         // We don't want to re-warn about add-ons
+         if (state == oldState)
+           continue;
+ 
+diff --git a/toolkit/mozapps/extensions/test/xpcshell/data/test_blocklist_metadata_filters_1.xml b/toolkit/mozapps/extensions/test/xpcshell/data/test_blocklist_metadata_filters_1.xml
+new file mode 100644
+--- /dev/null
++++ b/toolkit/mozapps/extensions/test/xpcshell/data/test_blocklist_metadata_filters_1.xml
+@@ -0,0 +1,20 @@
++<?xml version="1.0" encoding="UTF-8"?>
++
++<blocklist xmlns="http://www.mozilla.org/2006/addons-blocklist">
++  <emItems>
++    <emItem name="/^Mozilla Corp\.$/">
++      <versionRange severity="1">
++        <targetApplication id="xpcshell@tests.mozilla.org">
++          <versionRange minVersion="1" maxVersion="2.*"/>
++        </targetApplication>
++      </versionRange>
++    </emItem>
++    <emItem id="/block2/" name="/^Moz/" creator="Dangerous" homepageURL="/\.dangerous\.com/">
++      <versionRange severity="3">
++        <targetApplication id="xpcshell@tests.mozilla.org">
++          <versionRange minVersion="1" maxVersion="2.*"/>
++        </targetApplication>
++      </versionRange>
++    </emItem>
++  </emItems>
++</blocklist>
+diff --git a/toolkit/mozapps/extensions/test/xpcshell/test_blocklist_metadata_filters.js b/toolkit/mozapps/extensions/test/xpcshell/test_blocklist_metadata_filters.js
+new file mode 100644
+--- /dev/null
++++ b/toolkit/mozapps/extensions/test/xpcshell/test_blocklist_metadata_filters.js
+@@ -0,0 +1,163 @@
++/* Any copyright is dedicated to the Public Domain.
++ * http://creativecommons.org/publicdomain/zero/1.0/
++ */
++
++// Test blocking of extensions by ID, name, creator, homepageURL and RegExps for
++// each. See bug 897735.
++
++const {classes: Cc, interfaces: Ci, utils: Cu, results: Cr} = Components;
++
++const URI_EXTENSION_BLOCKLIST_DIALOG = "chrome://mozapps/content/extensions/blocklist.xul";
++
++Cu.import("resource://testing-common/httpd.js");
++var testserver = new HttpServer();
++testserver.start(-1);
++gPort = testserver.identity.primaryPort;
++
++// register static files with server and interpolate port numbers in them
++mapFile("/data/test_blocklist_metadata_filters_1.xml", testserver);
++
++const profileDir = gProfD.clone();
++profileDir.append("extensions");
++
++// Don't need the full interface, attempts to call other methods will just
++// throw which is just fine
++var WindowWatcher = {
++  openWindow: function(parent, url, name, features, arguments) {
++    // Should be called to list the newly blocklisted items
++    do_check_eq(url, URI_EXTENSION_BLOCKLIST_DIALOG);
++
++    // Simulate auto-disabling any softblocks
++    var list = arguments.wrappedJSObject.list;
++    list.forEach(function(aItem) {
++      if (!aItem.blocked)
++        aItem.disable = true;
++    });
++
++    //run the code after the blocklist is closed
++    Services.obs.notifyObservers(null, "addon-blocklist-closed", null);
++
++  },
++
++  QueryInterface: function(iid) {
++    if (iid.equals(Ci.nsIWindowWatcher)
++     || iid.equals(Ci.nsISupports))
++      return this;
++
++    throw Cr.NS_ERROR_NO_INTERFACE;
++  }
++};
++
++var WindowWatcherFactory = {
++  createInstance: function createInstance(outer, iid) {
++    if (outer != null)
++      throw Cr.NS_ERROR_NO_AGGREGATION;
++    return WindowWatcher.QueryInterface(iid);
++  }
++};
++
++var registrar = Components.manager.QueryInterface(Ci.nsIComponentRegistrar);
++registrar.registerFactory(Components.ID("{1dfeb90a-2193-45d5-9cb8-864928b2af55}"),
++                          "Fake Window Watcher",
++                          "@mozilla.org/embedcomp/window-watcher;1",
++                          WindowWatcherFactory);
++
++
++function load_blocklist(aFile, aCallback) {
++  Services.obs.addObserver(function() {
++    Services.obs.removeObserver(arguments.callee, "blocklist-updated");
++
++    do_execute_soon(aCallback);
++  }, "blocklist-updated", false);
++
++  Services.prefs.setCharPref("extensions.blocklist.url", "http://localhost:" +
++                             gPort + "/data/" + aFile);
++  var blocklist = Cc["@mozilla.org/extensions/blocklist;1"].
++                  getService(Ci.nsITimerCallback);
++  blocklist.notify(null);
++}
++
++
++function end_test() {
++  testserver.stop(do_test_finished);
++}
++
++function run_test() {
++  do_test_pending();
++
++  createAppInfo("xpcshell@tests.mozilla.org", "XPCShell", "1", "1");
++
++  // Should get blocked by name
++  writeInstallRDFForExtension({
++    id: "block1@tests.mozilla.org",
++    name: "Extension blocked only by name",
++    version: "1.0",
++    name: "Mozilla Corp.",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
++
++  // Should get blocked by all the attributes.=
++  writeInstallRDFForExtension({
++    id: "block2@tests.mozilla.org",
++    version: "1.0",
++    name: "Moz-addon",
++    creator: "Dangerous",
++    homepageURL: "www.extensions.dangerous.com",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
++
++  // Fails to get blocked because of a different ID even though other
++  // attributes match against an entry.
++  writeInstallRDFForExtension({
++    id: "block3@tests.mozilla.org",
++    version: "1.0",
++    name: "Moz-addon",
++    creator: "Dangerous",
++    homepageURL: "www.extensions.dangerous.com",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
++
++  startupManager();
++
++  AddonManager.getAddonsByIDs(["block1@tests.mozilla.org",
++                               "block2@tests.mozilla.org",
++                               "block3@tests.mozilla.org"], function([a1, a2, a3]) {
++    do_check_eq(a1.blocklistState, Ci.nsIBlocklistService.STATE_NOT_BLOCKED);
++    do_check_eq(a2.blocklistState, Ci.nsIBlocklistService.STATE_NOT_BLOCKED);
++    do_check_eq(a3.blocklistState, Ci.nsIBlocklistService.STATE_NOT_BLOCKED);
++
++    run_test_1();
++  });
++}
++
++function run_test_1() {
++  load_blocklist("test_blocklist_metadata_filters_1.xml", function() {
++    restartManager();
++
++    AddonManager.getAddonsByIDs(["block1@tests.mozilla.org",
++                                 "block2@tests.mozilla.org",
++                                 "block3@tests.mozilla.org"], function([a1, a2, a3]) {
++      do_check_neq(a1, null);
++      do_check_eq(a1.blocklistState, Ci.nsIBlocklistService.STATE_SOFTBLOCKED);
++
++      do_check_neq(a2, null);
++      do_check_eq(a2.blocklistState, Ci.nsIBlocklistService.STATE_BLOCKED);
++
++      do_check_neq(a3, null);
++      do_check_eq(a3.blocklistState, Ci.nsIBlocklistService.STATE_NOT_BLOCKED);
++      end_test();
++    });
++  });
++}
+diff --git a/toolkit/mozapps/extensions/test/xpcshell/xpcshell.ini b/toolkit/mozapps/extensions/test/xpcshell/xpcshell.ini
+--- a/toolkit/mozapps/extensions/test/xpcshell/xpcshell.ini
++++ b/toolkit/mozapps/extensions/test/xpcshell/xpcshell.ini
+@@ -15,16 +15,17 @@
+ skip-if = os == "android"
+ [test_DeferredSave.js]
+ [test_LightweightThemeManager.js]
+ [test_backgroundupdate.js]
+ [test_bad_json.js]
+ [test_badschema.js]
+ [test_blocklistchange.js]
+ [test_blocklist_prefs.js]
++[test_blocklist_metadata_filters.js]
+ # Bug 676992: test consistently hangs on Android
+ skip-if = os == "android"
+ [test_blocklist_regexp.js]
+ skip-if = os == "android"
+ [test_bootstrap.js]
+ # Bug 676992: test consistently hangs on Android
+ skip-if = os == "android"
+ [test_bug299716.js]
+diff --git a/xpcom/system/nsIBlocklistService.idl b/xpcom/system/nsIBlocklistService.idl
+--- a/xpcom/system/nsIBlocklistService.idl
++++ b/xpcom/system/nsIBlocklistService.idl
+@@ -24,52 +24,48 @@
+   const unsigned long STATE_OUTDATED    = 3;
+   // Indicates that the item is vulnerable and there is an update.
+   const unsigned long STATE_VULNERABLE_UPDATE_AVAILABLE = 4;
+   // Indicates that the item is vulnerable and there is no update.
+   const unsigned long STATE_VULNERABLE_NO_UPDATE = 5;
+ 
+   /**
+    * Determine if an item is blocklisted
+-   * @param   id
+-   *          The ID of the item.
+-   * @param   version
+-   *          The item's version.
++   * @param   addon
++   *          The addon item to be checked.
+    * @param   appVersion
+    *          The version of the application we are checking in the blocklist.
+    *          If this parameter is null, the version of the running application
+    *          is used.
+    * @param   toolkitVersion
+    *          The version of the toolkit we are checking in the blocklist.
+    *          If this parameter is null, the version of the running toolkit
+    *          is used.
+    * @returns true if the item is compatible with this version of the
+    *          application or this version of the toolkit, false, otherwise.
+    */
+-  boolean isAddonBlocklisted(in AString id, in AString version,
++  boolean isAddonBlocklisted(in jsval addon,
+                              [optional] in AString appVersion,
+                              [optional] in AString toolkitVersion);
+ 
+   /**
+    * Determine the blocklist state of an add-on
+    * @param   id
+-   *          The ID of the item.
+-   * @param   version
+-   *          The item's version.
++   *          The addon item to be checked.
+    * @param   appVersion
+    *          The version of the application we are checking in the blocklist.
+    *          If this parameter is null, the version of the running application
+    *          is used.
+    * @param   toolkitVersion
+    *          The version of the toolkit we are checking in the blocklist.
+    *          If this parameter is null, the version of the running toolkit
+    *          is used.
+    * @returns The STATE constant.
+    */
+-  unsigned long getAddonBlocklistState(in AString id, in AString version,
++  unsigned long getAddonBlocklistState(in jsval addon,
+                                        [optional] in AString appVersion,
+                                        [optional] in AString toolkitVersion);
+ 
+   /**
+    * Determine the blocklist state of a plugin
+    * @param   plugin
+    *          The plugin to get the state for
+    * @param   appVersion
+@@ -83,21 +79,21 @@
+    * @returns The STATE constant.
+    */
+   unsigned long getPluginBlocklistState(in nsIPluginTag plugin,
+                                         [optional] in AString appVersion,
+                                         [optional] in AString toolkitVersion);
+ 
+   /**
+    * Determine the blocklist web page of an add-on.
+-   * @param   id
+-   *          The ID of the blocked add-on.
++   * @param   addon
++   *          The addon item to be checked.
+    * @returns The URL of the description page.
+    */
+-  AString getAddonBlocklistURL(in AString id, in AString version,
++  AString getAddonBlocklistURL(in jsval addon,
+                               [optional] in AString appVersion,
+                               [optional] in AString toolkitVersion);
+ 
+   /**
+    * Determine the blocklist web page of a plugin.
+    * @param   plugin
+    *          The blocked plugin that we are determining the web page for.
+    * @returns The URL of the description page.
