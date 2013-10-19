@@ -1,9 +1,9 @@
 # HG changeset patch
 # User Sachin Hosmani <sachinhosmani2@gmail.com>
-# Date 1379703003 -19800
-#      Sat Sep 21 00:20:03 2013 +0530
-# Node ID 75b98a022fc7a173a0a54fc2b5b443f934f16142
-# Parent  f03b286b839048d9e24b6c27d8392ca6b7c00077
+# Date 1382208896 -19800
+#      Sun Oct 20 00:24:56 2013 +0530
+# Node ID a2bff1aa266334e1a6fa0e181947125f0df34604
+# Parent  5ab5e6e0939bba3755f0c2f3bfbbef8d86247401
 Bug 897735 - Support regular expression filters for name and creator in extension blocks
 
 diff --git a/toolkit/mozapps/extensions/AddonUpdateChecker.jsm b/toolkit/mozapps/extensions/AddonUpdateChecker.jsm
@@ -32,7 +32,7 @@ diff --git a/toolkit/mozapps/extensions/AddonUpdateChecker.jsm b/toolkit/mozapps
 diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extensions/XPIProvider.jsm
 --- a/toolkit/mozapps/extensions/XPIProvider.jsm
 +++ b/toolkit/mozapps/extensions/XPIProvider.jsm
-@@ -527,22 +527,20 @@
+@@ -535,22 +535,20 @@
                                 aOldPlatformVersion) {
    // Copy the properties by default
    aNewAddon.userDisabled = aOldAddon.userDisabled;
@@ -57,7 +57,7 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
  
    if (newBlocklistState == Ci.nsIBlocklistService.STATE_SOFTBLOCKED) {
      if (aNewAddon.type != "theme") {
-@@ -5842,29 +5840,29 @@
+@@ -5903,29 +5901,29 @@
  
    get blocklistState() {
      let staticItem = findMatchingStaticBlocklistItem(this);
@@ -89,6 +89,25 @@ diff --git a/toolkit/mozapps/extensions/XPIProvider.jsm b/toolkit/mozapps/extens
          if (aTargetApp.id == aUpdateTarget.id && (aSyncCompatibility ||
              Services.vc.compare(aTargetApp.maxVersion, aUpdateTarget.maxVersion) < 0)) {
            aTargetApp.minVersion = aUpdateTarget.minVersion;
+@@ -6033,17 +6031,17 @@
+     }
+ 
+     return [objValue, false];
+   }
+ 
+   ["id", "syncGUID", "version", "type", "isCompatible", "isPlatformCompatible",
+    "providesUpdatesSecurely", "blocklistState", "blocklistURL", "appDisabled",
+    "softDisabled", "skinnable", "size", "foreignInstall", "hasBinaryComponents",
+-   "strictCompatibility", "compatibilityOverrides"].forEach(function(aProp) {
++   "strictCompatibility", "compatibilityOverrides", "updateURL"].forEach(function(aProp) {
+      this.__defineGetter__(aProp, function AddonWrapper_propertyGetter() aAddon[aProp]);
+   }, this);
+ 
+   ["fullDescription", "developerComments", "eula", "supportURL",
+    "contributionURL", "contributionAmount", "averageRating", "reviewCount",
+    "reviewURL", "totalDownloads", "weeklyDownloads", "dailyUsers",
+    "repositoryStatus"].forEach(function(aProp) {
+     this.__defineGetter__(aProp, function AddonWrapper_repoPropertyGetter() {
 diff --git a/toolkit/mozapps/extensions/nsBlocklistService.js b/toolkit/mozapps/extensions/nsBlocklistService.js
 --- a/toolkit/mozapps/extensions/nsBlocklistService.js
 +++ b/toolkit/mozapps/extensions/nsBlocklistService.js
@@ -101,7 +120,7 @@ diff --git a/toolkit/mozapps/extensions/nsBlocklistService.js b/toolkit/mozapps/
  const VULNERABILITYSTATUS_UPDATE_AVAILABLE = 1;
  const VULNERABILITYSTATUS_NO_UPDATE        = 2;
  
-+const EXTENSION_BLOCK_FILTERS = ["id", "name", "creator", "homepageURL"];
++const EXTENSION_BLOCK_FILTERS = ["id", "name", "creator", "homepageURL", "updateURL"];
 +
  var gLoggingEnabled = null;
  var gBlocklistEnabled = true;
@@ -142,7 +161,7 @@ diff --git a/toolkit/mozapps/extensions/nsBlocklistService.js b/toolkit/mozapps/
     * the add-on blocklist entries to compare against.
     *
     * @param   id
-@@ -344,32 +346,32 @@
+@@ -344,71 +346,98 @@
     *          The application version to compare to, will use the current
     *          version if null.
     * @param   toolkitVersion
@@ -179,11 +198,16 @@ diff --git a/toolkit/mozapps/extensions/nsBlocklistService.js b/toolkit/mozapps/
  
    /**
     * Returns the set of prefs of the add-on stored in the blocklist file
-@@ -378,37 +380,64 @@
-    *        ID of the add-on.
+    * (probably to revert them on disabling).
+-   * @param id
+-   *        ID of the add-on.
++   * @param addon
++   *        The add-on whose to-be-reset prefs are to be found.
     */
-   _getAddonPrefs: function Blocklist_getAddonPrefs(id) {
-     let entry = this._findMatchingAddonEntry(this._addonEntries, id);
+-  _getAddonPrefs: function Blocklist_getAddonPrefs(id) {
+-    let entry = this._findMatchingAddonEntry(this._addonEntries, id);
++  _getAddonPrefs: function Blocklist_getAddonPrefs(addon) {
++    let entry = this._findMatchingAddonEntry(this._addonEntries, addon);
      return entry.prefs.slice(0);
    },
  
@@ -300,7 +324,7 @@ diff --git a/toolkit/mozapps/extensions/nsBlocklistService.js b/toolkit/mozapps/
        if (childElement.localName === "prefs") {
          let prefElements = childElement.childNodes;
          for (let i = 0; i < prefElements.length; i++) {
-@@ -923,19 +961,18 @@
+@@ -923,30 +961,29 @@
      }
      var self = this;
      const types = ["extension", "theme", "locale", "dictionary", "service"];
@@ -322,11 +346,61 @@ diff --git a/toolkit/mozapps/extensions/nsBlocklistService.js b/toolkit/mozapps/
          if (state == oldState)
            continue;
  
+         if (state === Ci.nsIBlocklistService.STATE_BLOCKED) {
+           // It's a hard block. We must reset certain preferences.
+-          let prefs = self._getAddonPrefs(addon.id);
++          let prefs = self._getAddonPrefs(addon);
+           resetPrefs(prefs);
+          }
+ 
+         // Ensure that softDisabled is false if the add-on is not soft blocked
+         if (state != Ci.nsIBlocklistService.STATE_SOFTBLOCKED)
+           addon.softDisabled = false;
+ 
+         // Don't warn about add-ons becoming unblocked.
+@@ -968,17 +1005,17 @@
+ 
+         addonList.push({
+           name: addon.name,
+           version: addon.version,
+           icon: addon.iconURL,
+           disable: false,
+           blocked: state == Ci.nsIBlocklistService.STATE_BLOCKED,
+           item: addon,
+-          url: self.getAddonBlocklistURL(addon.id),
++          url: self.getAddonBlocklistURL(addon),
+         });
+       }
+ 
+       AddonManagerPrivate.updateAddonAppDisabledStates();
+ 
+       var phs = Cc["@mozilla.org/plugin/host;1"].
+                 getService(Ci.nsIPluginHost);
+       var plugins = phs.getPluginTags();
+@@ -1051,17 +1088,17 @@
+             continue;
+ 
+           if (addon.item instanceof Ci.nsIPluginTag)
+             addon.item.enabledState = Ci.nsIPluginTag.STATE_DISABLED;
+           else {
+             // This add-on is softblocked.
+             addon.item.softDisabled = true;
+             // We must revert certain prefs.
+-            let prefs = self._getAddonPrefs(addon.item.id);
++            let prefs = self._getAddonPrefs(addon.item);
+             resetPrefs(prefs);
+           }
+         }
+ 
+         if (args.restart)
+           restartApp();
+ 
+         Services.obs.notifyObservers(self, "blocklist-updated", "");
 diff --git a/toolkit/mozapps/extensions/test/xpcshell/data/test_blocklist_metadata_filters_1.xml b/toolkit/mozapps/extensions/test/xpcshell/data/test_blocklist_metadata_filters_1.xml
 new file mode 100644
 --- /dev/null
 +++ b/toolkit/mozapps/extensions/test/xpcshell/data/test_blocklist_metadata_filters_1.xml
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,21 @@
 +<?xml version="1.0" encoding="UTF-8"?>
 +
 +<blocklist xmlns="http://www.mozilla.org/2006/addons-blocklist">
@@ -338,7 +412,8 @@ new file mode 100644
 +        </targetApplication>
 +      </versionRange>
 +    </emItem>
-+    <emItem id="/block2/" name="/^Moz/" creator="Dangerous" homepageURL="/\.dangerous\.com/">
++    <emItem id="/block2/" name="/^Moz/" creator="Dangerous"
++      homepageURL="/\.dangerous\.com/" updateURL="/\.dangerous\.com/">
 +      <versionRange severity="3">
 +        <targetApplication id="xpcshell@tests.mozilla.org">
 +          <versionRange minVersion="1" maxVersion="2.*"/>
@@ -347,16 +422,38 @@ new file mode 100644
 +    </emItem>
 +  </emItems>
 +</blocklist>
+diff --git a/toolkit/mozapps/extensions/test/xpcshell/data/test_bug393285.xml b/toolkit/mozapps/extensions/test/xpcshell/data/test_bug393285.xml
+--- a/toolkit/mozapps/extensions/test/xpcshell/data/test_bug393285.xml
++++ b/toolkit/mozapps/extensions/test/xpcshell/data/test_bug393285.xml
+@@ -1,14 +1,17 @@
+ <?xml version="1.0" encoding="UTF-8"?>
+ 
+ <blocklist xmlns="http://www.mozilla.org/2006/addons-blocklist">
+   <emItems>
+     <emItem id="test_bug393285_2@tests.mozilla.org"/>
+-    <emItem id="test_bug393285_3@tests.mozilla.org">
++    <emItem id="test_bug393285_3a@tests.mozilla.org">
++      <versionRange minVersion="1.0" maxVersion="1.0"/>
++    </emItem>
++    <emItem id="test_bug393285_3b@tests.mozilla.org">
+       <versionRange minVersion="1.0" maxVersion="1.0"/>
+     </emItem>
+     <emItem id="test_bug393285_4@tests.mozilla.org">
+       <versionRange minVersion="1.0" maxVersion="1.0">
+         <targetApplication id="xpcshell@tests.mozilla.org">
+           <versionRange minVersion="1.0" maxVersion="1.0"/>
+         </targetApplication>
+       </versionRange>
 diff --git a/toolkit/mozapps/extensions/test/xpcshell/test_blocklist_metadata_filters.js b/toolkit/mozapps/extensions/test/xpcshell/test_blocklist_metadata_filters.js
 new file mode 100644
 --- /dev/null
 +++ b/toolkit/mozapps/extensions/test/xpcshell/test_blocklist_metadata_filters.js
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,159 @@
 +/* Any copyright is dedicated to the Public Domain.
 + * http://creativecommons.org/publicdomain/zero/1.0/
 + */
 +
-+// Test blocking of extensions by ID, name, creator, homepageURL and RegExps for
++// Tests blocking of extensions by ID, name, creator, homepageURL and RegExps for
 +// each. See bug 897735.
 +
 +const {classes: Cc, interfaces: Ci, utils: Cu, results: Cr} = Components;
@@ -444,7 +541,6 @@ new file mode 100644
 +  // Should get blocked by name
 +  writeInstallRDFForExtension({
 +    id: "block1@tests.mozilla.org",
-+    name: "Extension blocked only by name",
 +    version: "1.0",
 +    name: "Mozilla Corp.",
 +    targetApplications: [{
@@ -454,13 +550,14 @@ new file mode 100644
 +    }]
 +  }, profileDir);
 +
-+  // Should get blocked by all the attributes.=
++  // Should get blocked by all the attributes.
 +  writeInstallRDFForExtension({
 +    id: "block2@tests.mozilla.org",
 +    version: "1.0",
 +    name: "Moz-addon",
 +    creator: "Dangerous",
-+    homepageURL: "www.extensions.dangerous.com",
++    homepageURL: "www.extension.dangerous.com",
++    updateURL: "www.extension.dangerous.com/update.rdf",
 +    targetApplications: [{
 +      id: "xpcshell@tests.mozilla.org",
 +      minVersion: "1",
@@ -469,13 +566,14 @@ new file mode 100644
 +  }, profileDir);
 +
 +  // Fails to get blocked because of a different ID even though other
-+  // attributes match against an entry.
++  // attributes match against a blocklist entry.
 +  writeInstallRDFForExtension({
 +    id: "block3@tests.mozilla.org",
 +    version: "1.0",
 +    name: "Moz-addon",
 +    creator: "Dangerous",
 +    homepageURL: "www.extensions.dangerous.com",
++    updateURL: "www.extension.dangerous.com/update.rdf",
 +    targetApplications: [{
 +      id: "xpcshell@tests.mozilla.org",
 +      minVersion: "1",
@@ -503,22 +601,639 @@ new file mode 100644
 +    AddonManager.getAddonsByIDs(["block1@tests.mozilla.org",
 +                                 "block2@tests.mozilla.org",
 +                                 "block3@tests.mozilla.org"], function([a1, a2, a3]) {
-+      do_check_neq(a1, null);
 +      do_check_eq(a1.blocklistState, Ci.nsIBlocklistService.STATE_SOFTBLOCKED);
-+
-+      do_check_neq(a2, null);
 +      do_check_eq(a2.blocklistState, Ci.nsIBlocklistService.STATE_BLOCKED);
-+
-+      do_check_neq(a3, null);
 +      do_check_eq(a3.blocklistState, Ci.nsIBlocklistService.STATE_NOT_BLOCKED);
 +      end_test();
 +    });
 +  });
 +}
-diff --git a/toolkit/mozapps/extensions/test/xpcshell/xpcshell.ini b/toolkit/mozapps/extensions/test/xpcshell/xpcshell.ini
---- a/toolkit/mozapps/extensions/test/xpcshell/xpcshell.ini
-+++ b/toolkit/mozapps/extensions/test/xpcshell/xpcshell.ini
-@@ -15,16 +15,17 @@
+diff --git a/toolkit/mozapps/extensions/test/xpcshell/test_bug335238.js b/toolkit/mozapps/extensions/test/xpcshell/test_bug335238.js
+--- a/toolkit/mozapps/extensions/test/xpcshell/test_bug335238.js
++++ b/toolkit/mozapps/extensions/test/xpcshell/test_bug335238.js
+@@ -74,30 +74,30 @@
+   {id: "bug335238_3@tests.mozilla.org",
+    addon: "test_bug335238_3"},
+   {id: "bug335238_4@tests.mozilla.org",
+    addon: "test_bug335238_4"}
+ ];
+ 
+ // This is a replacement for the blocklist service
+ var BlocklistService = {
+-  getAddonBlocklistState: function(aId, aVersion, aAppVersion, aToolkitVersion) {
+-    if (aId == "bug335238_3@tests.mozilla.org")
++  getAddonBlocklistState: function(aAddon, aAppVersion, aToolkitVersion) {
++    if (aAddon.id == "bug335238_3@tests.mozilla.org")
+       return Ci.nsIBlocklistService.STATE_SOFTBLOCKED;
+-    if (aId == "bug335238_4@tests.mozilla.org")
++    if (aAddon.id == "bug335238_4@tests.mozilla.org")
+       return Ci.nsIBlocklistService.STATE_BLOCKED;
+     return Ci.nsIBlocklistService.STATE_NOT_BLOCKED;
+   },
+ 
+   getPluginBlocklistState: function(aPlugin, aVersion, aAppVersion, aToolkitVersion) {
+     return Ci.nsIBlocklistService.STATE_NOT_BLOCKED;
+   },
+ 
+-  isAddonBlocklisted: function(aId, aVersion, aAppVersion, aToolkitVersion) {
+-    return this.getAddonBlocklistState(aId, aVersion, aAppVersion, aToolkitVersion) ==
++  isAddonBlocklisted: function(aAddon, aAppVersion, aToolkitVersion) {
++    return this.getAddonBlocklistState(aAddon.id, aVersion, aAppVersion, aToolkitVersion) ==
+            Ci.nsIBlocklistService.STATE_BLOCKED;
+   },
+ 
+   QueryInterface: function(iid) {
+     if (iid.equals(Ci.nsIBlocklistService)
+      || iid.equals(Ci.nsISupports))
+       return this;
+ 
+diff --git a/toolkit/mozapps/extensions/test/xpcshell/test_bug393285.js b/toolkit/mozapps/extensions/test/xpcshell/test_bug393285.js
+--- a/toolkit/mozapps/extensions/test/xpcshell/test_bug393285.js
++++ b/toolkit/mozapps/extensions/test/xpcshell/test_bug393285.js
+@@ -1,55 +1,327 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+  */
+ 
++const {classes: Cc, interfaces: Ci, utils: Cu, results: Cr} = Components;
++
++const URI_EXTENSION_BLOCKLIST_DIALOG = "chrome://mozapps/content/extensions/blocklist.xul";
++
++Cu.import("resource://testing-common/httpd.js");
++var testserver = new HttpServer();
++testserver.start(-1);
++gPort = testserver.identity.primaryPort;
++
++// register static files with server and interpolate port numbers in them
++mapFile("/data/test_bug393285.xml", testserver);
++
++const profileDir = gProfD.clone();
++profileDir.append("extensions");
++
++let addonIDs = ["test_bug393285_1@tests.mozilla.org",
++                "test_bug393285_2@tests.mozilla.org",
++                "test_bug393285_3a@tests.mozilla.org",
++                "test_bug393285_3b@tests.mozilla.org",
++                "test_bug393285_4@tests.mozilla.org",
++                "test_bug393285_5@tests.mozilla.org",
++                "test_bug393285_6@tests.mozilla.org",
++                "test_bug393285_7@tests.mozilla.org",
++                "test_bug393285_8@tests.mozilla.org",
++                "test_bug393285_9@tests.mozilla.org",
++                "test_bug393285_10@tests.mozilla.org",
++                "test_bug393285_11@tests.mozilla.org",
++                "test_bug393285_12@tests.mozilla.org",
++                "test_bug393285_13@tests.mozilla.org",
++                "test_bug393285_14@tests.mozilla.org"];
++
++// A window watcher to deal with the blocklist UI dialog.
++var WindowWatcher = {
++  openWindow: function(parent, url, name, features, arguments) {
++    // Should be called to list the newly blocklisted items
++    do_check_eq(url, URI_EXTENSION_BLOCKLIST_DIALOG);
++
++    // Simulate auto-disabling any softblocks
++    var list = arguments.wrappedJSObject.list;
++    list.forEach(function(aItem) {
++      if (!aItem.blocked)
++        aItem.disable = true;
++    });
++
++    //run the code after the blocklist is closed
++    Services.obs.notifyObservers(null, "addon-blocklist-closed", null);
++
++  },
++
++  QueryInterface: function(iid) {
++    if (iid.equals(Ci.nsIWindowWatcher)
++     || iid.equals(Ci.nsISupports))
++      return this;
++
++    throw Cr.NS_ERROR_NO_INTERFACE;
++  }
++};
++
++var WindowWatcherFactory = {
++  createInstance: function createInstance(outer, iid) {
++    if (outer != null)
++      throw Cr.NS_ERROR_NO_AGGREGATION;
++    return WindowWatcher.QueryInterface(iid);
++  }
++};
++
++var registrar = Components.manager.QueryInterface(Ci.nsIComponentRegistrar);
++registrar.registerFactory(Components.ID("{1dfeb90a-2193-45d5-9cb8-864928b2af55}"),
++                          "Fake Window Watcher",
++                          "@mozilla.org/embedcomp/window-watcher;1",
++                          WindowWatcherFactory);
++
++
++function load_blocklist(aFile, aCallback) {
++  Services.obs.addObserver(function() {
++    Services.obs.removeObserver(arguments.callee, "blocklist-updated");
++
++    do_execute_soon(aCallback);
++  }, "blocklist-updated", false);
++
++  Services.prefs.setCharPref("extensions.blocklist.url", "http://localhost:" +
++                             gPort + "/data/" + aFile);
++  var blocklist = Cc["@mozilla.org/extensions/blocklist;1"].
++                  getService(Ci.nsITimerCallback);
++  blocklist.notify(null);
++}
++
++
++function end_test() {
++  testserver.stop(do_test_finished);
++}
++
+ function run_test() {
++  do_test_pending();
++
+   createAppInfo("xpcshell@tests.mozilla.org", "XPCShell", "1", "1.9");
+ 
+-  // We cannot force the blocklist to update so just copy our test list to the profile
+-  var blocklistFile = gProfD.clone();
+-  blocklistFile.append("blocklist.xml");
+-  if (blocklistFile.exists())
+-    blocklistFile.remove(false);
+-  var source = do_get_file("data/test_bug393285.xml");
+-  source.copyTo(gProfD, "blocklist.xml");
++  writeInstallRDFForExtension({
++    id: "test_bug393285_1@tests.mozilla.org",
++    name: "extension 1",
++    version: "1.0",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
+ 
+-  var blocklist = Components.classes["@mozilla.org/extensions/blocklist;1"]
+-                            .getService(Components.interfaces.nsIBlocklistService);
+-  
+-  // No info in blocklist, shouldn't be blocked
+-  do_check_false(blocklist.isAddonBlocklisted("test_bug393285_1@tests.mozilla.org", "1", "1", "1.9"));
+ 
+-  // Should always be blocked
+-  do_check_true(blocklist.isAddonBlocklisted("test_bug393285_2@tests.mozilla.org", "1", "1", "1.9"));
++  writeInstallRDFForExtension({
++    id: "test_bug393285_2@tests.mozilla.org",
++    name: "extension 2",
++    version: "1.0",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
+ 
+-  // Only version 1 should be blocked
+-  do_check_true(blocklist.isAddonBlocklisted("test_bug393285_3@tests.mozilla.org", "1", "1", "1.9"));
+-  do_check_false(blocklist.isAddonBlocklisted("test_bug393285_3@tests.mozilla.org", "2", "1", "1.9"));
++  writeInstallRDFForExtension({
++    id: "test_bug393285_3a@tests.mozilla.org",
++    name: "extension 3a",
++    version: "1.0",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
+ 
+-  // Should be blocked for app version 1
+-  do_check_true(blocklist.isAddonBlocklisted("test_bug393285_4@tests.mozilla.org", "1", "1", "1.9"));
+-  do_check_false(blocklist.isAddonBlocklisted("test_bug393285_4@tests.mozilla.org", "1", "2", "1.9"));
++  writeInstallRDFForExtension({
++    id: "test_bug393285_3b@tests.mozilla.org",
++    name: "extension 3b",
++    version: "2.0",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
+ 
+-  // Not blocklisted because we are a different OS
+-  do_check_false(blocklist.isAddonBlocklisted("test_bug393285_5@tests.mozilla.org", "1", "2", "1.9"));
++  writeInstallRDFForExtension({
++    id: "test_bug393285_4@tests.mozilla.org",
++    name: "extension 4",
++    version: "1.0",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
+ 
+-  // Blocklisted based on OS
+-  do_check_true(blocklist.isAddonBlocklisted("test_bug393285_6@tests.mozilla.org", "1", "2", "1.9"));
+-  do_check_true(blocklist.isAddonBlocklisted("test_bug393285_7@tests.mozilla.org", "1", "2", "1.9"));
++  writeInstallRDFForExtension({
++    id: "test_bug393285_5@tests.mozilla.org",
++    name: "extension 5",
++    version: "1.0",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
+ 
+-  // Not blocklisted because we are a different ABI
+-  do_check_false(blocklist.isAddonBlocklisted("test_bug393285_8@tests.mozilla.org", "1", "2", "1.9"));
++  writeInstallRDFForExtension({
++    id: "test_bug393285_6@tests.mozilla.org",
++    name: "extension 6",
++    version: "1.0",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
+ 
+-  // Blocklisted based on ABI
+-  do_check_true(blocklist.isAddonBlocklisted("test_bug393285_9@tests.mozilla.org", "1", "2", "1.9"));
+-  do_check_true(blocklist.isAddonBlocklisted("test_bug393285_10@tests.mozilla.org", "1", "2", "1.9"));
++  writeInstallRDFForExtension({
++    id: "test_bug393285_7@tests.mozilla.org",
++    name: "extension 7",
++    version: "1.0",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
+ 
+-  // Doesnt match both os and abi so not blocked
+-  do_check_false(blocklist.isAddonBlocklisted("test_bug393285_11@tests.mozilla.org", "1", "2", "1.9"));
+-  do_check_false(blocklist.isAddonBlocklisted("test_bug393285_12@tests.mozilla.org", "1", "2", "1.9"));
+-  do_check_false(blocklist.isAddonBlocklisted("test_bug393285_13@tests.mozilla.org", "1", "2", "1.9"));
++  writeInstallRDFForExtension({
++    id: "test_bug393285_8@tests.mozilla.org",
++    name: "extension 8",
++    version: "1.0",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
+ 
+-  // Matches both os and abi so blocked
+-  do_check_true(blocklist.isAddonBlocklisted("test_bug393285_14@tests.mozilla.org", "1", "2", "1.9"));
++  writeInstallRDFForExtension({
++    id: "test_bug393285_9@tests.mozilla.org",
++    name: "extension 9",
++    version: "1.0",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
++
++  writeInstallRDFForExtension({
++    id: "test_bug393285_10@tests.mozilla.org",
++    name: "extension 10",
++    version: "1.0",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
++
++  writeInstallRDFForExtension({
++    id: "test_bug393285_11@tests.mozilla.org",
++    name: "extension 11",
++    version: "1.0",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
++
++  writeInstallRDFForExtension({
++    id: "test_bug393285_12@tests.mozilla.org",
++    name: "extension 12",
++    version: "1.0",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
++
++  writeInstallRDFForExtension({
++    id: "test_bug393285_13@tests.mozilla.org",
++    name: "extension 13",
++    version: "1.0",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
++
++  writeInstallRDFForExtension({
++    id: "test_bug393285_14@tests.mozilla.org",
++    name: "extension 14",
++    version: "1.0",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
++
++  startupManager();
++
++  AddonManager.getAddonsByIDs(addonIDs, function(addons) {
++    for (addon of addons) {
++      do_check_eq(addon.blocklistState, Ci.nsIBlocklistService.STATE_NOT_BLOCKED);
++    }
++    run_test_1();
++  });
+ }
++
++function run_test_1() {
++  load_blocklist("test_bug393285.xml", function() {
++    restartManager();
++
++    var blocklist = Cc["@mozilla.org/extensions/blocklist;1"]
++                    .getService(Ci.nsIBlocklistService);
++
++    AddonManager.getAddonsByIDs(addonIDs,
++                               function([a1, a2, a3, a4, a5, a6, a7, a8, a9, a10,
++                                         a11, a12, a13, a14, a15]) {
++      // No info in blocklist, shouldn't be blocked
++      do_check_false(blocklist.isAddonBlocklisted(a1, "1", "1.9"));
++
++      // Should always be blocked
++      do_check_true(blocklist.isAddonBlocklisted(a2, "1", "1.9"));
++
++      // Only version 1 should be blocked
++      do_check_true(blocklist.isAddonBlocklisted(a3, "1", "1.9"));
++      do_check_false(blocklist.isAddonBlocklisted(a4, "1", "1.9"));
++
++      // Should be blocked for app version 1
++      do_check_true(blocklist.isAddonBlocklisted(a5, "1", "1.9"));
++      do_check_false(blocklist.isAddonBlocklisted(a5, "2", "1.9"));
++
++      // Not blocklisted because we are a different OS
++      do_check_false(blocklist.isAddonBlocklisted(a6, "2", "1.9"));
++
++      // Blocklisted based on OS
++      do_check_true(blocklist.isAddonBlocklisted(a7, "2", "1.9"));
++      do_check_true(blocklist.isAddonBlocklisted(a8, "2", "1.9"));
++
++      // Not blocklisted because we are a different ABI
++      do_check_false(blocklist.isAddonBlocklisted(a9, "2", "1.9"));
++
++      // Blocklisted based on ABI
++      do_check_true(blocklist.isAddonBlocklisted(a10, "2", "1.9"));
++      do_check_true(blocklist.isAddonBlocklisted(a11, "2", "1.9"));
++
++      // Doesnt match both os and abi so not blocked
++      do_check_false(blocklist.isAddonBlocklisted(a12, "2", "1.9"));
++      do_check_false(blocklist.isAddonBlocklisted(a13, "2", "1.9"));
++      do_check_false(blocklist.isAddonBlocklisted(a14, "2", "1.9"));
++
++      // Matches both os and abi so blocked
++      do_check_true(blocklist.isAddonBlocklisted(a15, "2", "1.9"));
++      end_test();
++    });
++  });
++}
+diff --git a/toolkit/mozapps/extensions/test/xpcshell/test_bug406118.js b/toolkit/mozapps/extensions/test/xpcshell/test_bug406118.js
+--- a/toolkit/mozapps/extensions/test/xpcshell/test_bug406118.js
++++ b/toolkit/mozapps/extensions/test/xpcshell/test_bug406118.js
+@@ -1,26 +1,167 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+  */
+ 
++let addonIDs = ["test_bug393285_1@tests.mozilla.org",
++                "test_bug393285_2@tests.mozilla.org",
++                "test_bug393285_3a@tests.mozilla.org",
++                "test_bug393285_4@tests.mozilla.org"];
++
++const {classes: Cc, interfaces: Ci, utils: Cu, results: Cr} = Components;
++
++const URI_EXTENSION_BLOCKLIST_DIALOG = "chrome://mozapps/content/extensions/blocklist.xul";
++
++Cu.import("resource://testing-common/httpd.js");
++var testserver = new HttpServer();
++testserver.start(-1);
++gPort = testserver.identity.primaryPort;
++
++// register static files with server and interpolate port numbers in them
++mapFile("/data/test_bug393285.xml", testserver);
++
++const profileDir = gProfD.clone();
++profileDir.append("extensions");
++
++// A window watcher to deal with the blocklist UI dialog.
++var WindowWatcher = {
++  openWindow: function(parent, url, name, features, arguments) {
++    // Should be called to list the newly blocklisted items
++    do_check_eq(url, URI_EXTENSION_BLOCKLIST_DIALOG);
++
++    // Simulate auto-disabling any softblocks
++    var list = arguments.wrappedJSObject.list;
++    list.forEach(function(aItem) {
++      if (!aItem.blocked)
++        aItem.disable = true;
++    });
++
++    //run the code after the blocklist is closed
++    Services.obs.notifyObservers(null, "addon-blocklist-closed", null);
++
++  },
++
++  QueryInterface: function(iid) {
++    if (iid.equals(Ci.nsIWindowWatcher)
++     || iid.equals(Ci.nsISupports))
++      return this;
++
++    throw Cr.NS_ERROR_NO_INTERFACE;
++  }
++};
++
++var WindowWatcherFactory = {
++  createInstance: function createInstance(outer, iid) {
++    if (outer != null)
++      throw Cr.NS_ERROR_NO_AGGREGATION;
++    return WindowWatcher.QueryInterface(iid);
++  }
++};
++
++var registrar = Components.manager.QueryInterface(Ci.nsIComponentRegistrar);
++registrar.registerFactory(Components.ID("{1dfeb90a-2193-45d5-9cb8-864928b2af55}"),
++                          "Fake Window Watcher",
++                          "@mozilla.org/embedcomp/window-watcher;1",
++                          WindowWatcherFactory);
++
++
++function load_blocklist(aFile, aCallback) {
++  Services.obs.addObserver(function() {
++    Services.obs.removeObserver(arguments.callee, "blocklist-updated");
++
++    do_execute_soon(aCallback);
++  }, "blocklist-updated", false);
++
++  Services.prefs.setCharPref("extensions.blocklist.url", "http://localhost:" +
++                             gPort + "/data/" + aFile);
++  var blocklist = Cc["@mozilla.org/extensions/blocklist;1"].
++                  getService(Ci.nsITimerCallback);
++  blocklist.notify(null);
++}
++
++
++function end_test() {
++  testserver.stop(do_test_finished);
++}
++
+ function run_test() {
++  do_test_pending();
++
+   createAppInfo("xpcshell@tests.mozilla.org", "XPCShell", "1", "1.9");
+ 
+-  // We cannot force the blocklist to update so just copy our test list to the profile
+-  var blocklistFile = gProfD.clone();
+-  blocklistFile.append("blocklist.xml");
+-  if (blocklistFile.exists())
+-    blocklistFile.remove(false);
+-  var source = do_get_file("data/test_bug393285.xml");
+-  source.copyTo(gProfD, "blocklist.xml");
++  writeInstallRDFForExtension({
++    id: "test_bug393285_1@tests.mozilla.org",
++    name: "extension 1",
++    version: "1.0",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
+ 
+-  var blocklist = Components.classes["@mozilla.org/extensions/blocklist;1"]
+-                            .getService(Components.interfaces.nsIBlocklistService);
+-  
+-  // All these should be blocklisted for the current app.
+-  do_check_false(blocklist.isAddonBlocklisted("test_bug393285_1@tests.mozilla.org", "1", null, null));
+-  do_check_true(blocklist.isAddonBlocklisted("test_bug393285_2@tests.mozilla.org", "1", null, null));
+-  do_check_true(blocklist.isAddonBlocklisted("test_bug393285_3@tests.mozilla.org", "1", null, null));
+-  do_check_true(blocklist.isAddonBlocklisted("test_bug393285_4@tests.mozilla.org", "1", null, null));
+ 
++  writeInstallRDFForExtension({
++    id: "test_bug393285_2@tests.mozilla.org",
++    name: "extension 2",
++    version: "1.0",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
++
++  writeInstallRDFForExtension({
++    id: "test_bug393285_3a@tests.mozilla.org",
++    name: "extension 3a",
++    version: "1.0",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
++
++  writeInstallRDFForExtension({
++    id: "test_bug393285_4@tests.mozilla.org",
++    name: "extension 4",
++    version: "1.0",
++    targetApplications: [{
++      id: "xpcshell@tests.mozilla.org",
++      minVersion: "1",
++      maxVersion: "3"
++    }]
++  }, profileDir);
++
++  startupManager();
++
++  AddonManager.getAddonsByIDs(addonIDs, function(addons) {
++    for (addon of addons) {
++      do_check_eq(addon.blocklistState, Ci.nsIBlocklistService.STATE_NOT_BLOCKED);
++    }
++    run_test_1();
++  });
+ }
++
++function run_test_1() {
++  load_blocklist("test_bug393285.xml", function() {
++    restartManager();
++
++    var blocklist = Cc["@mozilla.org/extensions/blocklist;1"]
++                    .getService(Ci.nsIBlocklistService);
++
++    AddonManager.getAddonsByIDs(addonIDs,
++                               function([a1, a2, a3, a4]) {
++      // No info in blocklist, shouldn't be blocked
++      do_check_false(blocklist.isAddonBlocklisted(a1, null, null));
++
++      // All these should be blocklisted for the current app.
++      do_check_true(blocklist.isAddonBlocklisted(a2, null, null));
++      do_check_true(blocklist.isAddonBlocklisted(a3, null, null));
++      do_check_true(blocklist.isAddonBlocklisted(a4, null, null));
++
++      end_test();
++    });
++  });
++}
+diff --git a/toolkit/mozapps/extensions/test/xpcshell/test_bug455906.js b/toolkit/mozapps/extensions/test/xpcshell/test_bug455906.js
+--- a/toolkit/mozapps/extensions/test/xpcshell/test_bug455906.js
++++ b/toolkit/mozapps/extensions/test/xpcshell/test_bug455906.js
+@@ -454,21 +454,21 @@
+     do_check_eq(check_plugin_state(PLUGINS[2]), "false,true");
+     do_check_eq(check_plugin_state(PLUGINS[3]), "true,true");
+     do_check_eq(check_plugin_state(PLUGINS[4]), "false,true");
+ 
+     // Should have gained the blocklist state but no longer be soft disabled
+     do_check_eq(check_addon_state(addons[3]), "false,false,true");
+ 
+     // Check blockIDs are correct
+-    do_check_eq(blocklist.getAddonBlocklistURL(addons[0].id,''),create_blocklistURL(addons[0].id));
+-    do_check_eq(blocklist.getAddonBlocklistURL(addons[1].id,''),create_blocklistURL(addons[1].id));
+-    do_check_eq(blocklist.getAddonBlocklistURL(addons[2].id,''),create_blocklistURL(addons[2].id));
+-    do_check_eq(blocklist.getAddonBlocklistURL(addons[3].id,''),create_blocklistURL(addons[3].id));
+-    do_check_eq(blocklist.getAddonBlocklistURL(addons[4].id,''),create_blocklistURL(addons[4].id));
++    do_check_eq(blocklist.getAddonBlocklistURL(addons[0]),create_blocklistURL(addons[0].id));
++    do_check_eq(blocklist.getAddonBlocklistURL(addons[1]),create_blocklistURL(addons[1].id));
++    do_check_eq(blocklist.getAddonBlocklistURL(addons[2]),create_blocklistURL(addons[2].id));
++    do_check_eq(blocklist.getAddonBlocklistURL(addons[3]),create_blocklistURL(addons[3].id));
++    do_check_eq(blocklist.getAddonBlocklistURL(addons[4]),create_blocklistURL(addons[4].id));
+ 
+     // All plugins have the same blockID on the test
+     do_check_eq(blocklist.getPluginBlocklistURL(PLUGINS[0]), create_blocklistURL('test_bug455906_plugin'));
+     do_check_eq(blocklist.getPluginBlocklistURL(PLUGINS[1]), create_blocklistURL('test_bug455906_plugin'));
+     do_check_eq(blocklist.getPluginBlocklistURL(PLUGINS[2]), create_blocklistURL('test_bug455906_plugin'));
+     do_check_eq(blocklist.getPluginBlocklistURL(PLUGINS[3]), create_blocklistURL('test_bug455906_plugin'));
+     do_check_eq(blocklist.getPluginBlocklistURL(PLUGINS[4]), create_blocklistURL('test_bug455906_plugin'));
+ 
+diff --git a/toolkit/mozapps/extensions/test/xpcshell/xpcshell-shared.ini b/toolkit/mozapps/extensions/test/xpcshell/xpcshell-shared.ini
+--- a/toolkit/mozapps/extensions/test/xpcshell/xpcshell-shared.ini
++++ b/toolkit/mozapps/extensions/test/xpcshell/xpcshell-shared.ini
+@@ -11,16 +11,17 @@
  skip-if = os == "android"
  [test_DeferredSave.js]
  [test_LightweightThemeManager.js]
